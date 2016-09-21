@@ -4,18 +4,19 @@
 
 .EQU	TMR_COMP_VAL = 645	; about 3.1 khz (50% duty cycle) at 4mhz clock source
 
-; r0 is allways 0 for cpse commands
-;.def	itmp		= r1	; interrupts temp register
-;.def	itmp1		= r2	; interrupts temp register
-.def	z0			= r24	; zero reg
-.def	itmp_sreg	= r22	; storage for SREG in interrupts
-.def	buz_on_cntr	= r23	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
+; r0-r15 is not available in this tiny mcu series.
 .def	tmp			= r16 	; general temp register
 .def	tmp1		= r17 	; general temp register
 .def	pwm_volume	= r18	; range: 1-19. Variable that sets the volume of buzzer (intervalk when BUZZ_Out in fast PWM is HIGH)
 .def	pwm_counter	= r19	; just a counter for fast PWM duty cycle
 .def	pwm_pin		= r20	; bit indicates the state of 3khz duty cycle (1-1st half, 0-2nd half)
 .def	pwm_dutyfst	= r21	; const value 20. Duty cycle len for fast PWM
+.def	buz_on_cntr	= r22	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
+.def	itmp_sreg	= r23	; storage for SREG in interrupts
+;.def	itmp		= r24	; interrupts temp register
+;.def	itmp1		= r25	; interrupts temp register
+.def	mute_buzz	= r30	; flag indicates that we need to mute buzzer (after reset manually pressed).
+.def	z0			= r31	; zero reg
 ; r30 has the flag (no sound)
 
 .CSEG
@@ -24,7 +25,7 @@
 		rjmp PC_int	; PCINT0 Handler
 		reti		; Timer0 Capture Handler
 		reti		; Timer0 Overflow Handler
-		reti		;rjmp TmrC_int; Timer0 Compare A Handler
+		set			; Timer0 Compare A Handler (save time for rcall). exits by next reti command
 		reti		; Timer0 Compare B Handler
 		reti		; Analog Comparator Handler
 		rjmp WDT_int; Watchdog Interrupt Handler
@@ -34,19 +35,17 @@
 
 RESET: 	
 		; first determine why we are here (by power-on or by reset pin goes to low)
-		clr r30
+		clr mute_buzz
 		in tmp, RSTFLR
 		sbrc tmp, EXTRF ; skip next command if reset occurs not by external reset
-		ldi r30, 1 ; we should produce no sound until full power restored (ADC reads 5 volts or more)
-		clr tmp
-		out RSTFLR, tmp	; reset all reset flags 
+		ldi mute_buzz, 1 ; we should produce no sound until full power restored (ADC reads 5 volts or more)
+		out RSTFLR, z0	; reset all reset flags 
 		
 		ldi tmp, 	(1 << BUZZ_Out)	; set pin as output
 		out DDRB,	tmp				; all other pins will be inputs		
 		ldi tmp, 	(1 << BUZZ_Inp)	; enable pull-up to protect floating input when no power on FC
 		out PUEB,	tmp				; 
-		clr	tmp
-		out PORTB, tmp				; all pins to LOW
+		out PORTB, z0				; all pins to LOW
 
 		ldi tmp, high (RAMEND) ; Main program start
 		out SPH,tmp ; Set Stack Pointer
@@ -88,8 +87,9 @@ RESET:
 		out TCCR0A, tmp
 		ldi tmp, (1 << WGM02) | (1 << CS00)
 		out TCCR0B, tmp
-		ldi tmp, (0 << OCIE0A) ; currently disable compare interrupt (seems it is faster to take care of it manually)
+		ldi tmp, (1 << OCIE0A) ; enable compare interrupt and set in the interrupt routine T flag
 		out TIMSK0, tmp
+		clt				; clear T flag for the Compare interrupt
 		
 		; initialize variables
 		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
@@ -116,40 +116,44 @@ MAIN_loop:
 		ldi tmp,low(TMR_COMP_VAL)
 		out OCR0AH,tmp1
 		out OCR0AL,tmp
+		clt		; clear T flag
 		sei
 
 		ldi pwm_pin, 1	; pin state (bit 0 - on/off)
 		; pwm_counter is a counter here
 PWM_loop:
 		; check pwm_pin for main PWM, should we be low, or fast PWM?
-		sbrs pwm_pin, 0	; check bit 0
-		rjmp PWM_low ; no pin activity on second half of 3khz duty cycle
+		sbrs pwm_pin, 0					;3 check bit 0
+		rjmp PWM_low 					;(2) no pin activity on second half of 3khz duty cycle
 		; lets toggle fast Buzzer pin while we in first half of 3khz duty cycle
-		clr pwm_counter		; counter for fast PWM
 		; Fast PWM
-		sbi PORTB, BUZZ_Out ; turn buzzer ON
-PWM_loop_fast:
-		in tmp, TIFR0
-		sbrc tmp, OCF0A ; compare match?
-		rjmp PWM_loop_slow	; We reached second half of 3khz duty cycle?
-		inc	pwm_counter				; count value for pin ON for Buzzer volume regulation
-		cpse pwm_counter, pwm_volume	; need to go low. Go out of the loop if values is equal
-		rjmp PWM_loop_fast
-		cbi PORTB, BUZZ_Out ; turn buzzer OFF
-PWM_loop_fast1:		
-		in tmp, TIFR0
-		sbrc tmp, OCF0A ; compare match?
-		rjmp PWM_loop_slow	; We reached second half of 3khz duty cycle?
-		inc	pwm_counter			; continue to count while buzzer pin is off in fast PWM
-		cpse pwm_counter, pwm_dutyfst	; go out of the loop if values is equal
-		rjmp PWM_loop_fast1
-		rjmp PWM_loop	; loop untill exit by Timer Compare match
+		sbi PORTB, BUZZ_Out 			;1 turn buzzer ON
+		mov pwm_counter, pwm_volume		; Initialize counter
+PWM_loop_fast: ; 4 cpu cycles per loop
+		;in tmp, TIFR0					;1
+		;sbrc tmp, OCF0A 				;3 compare match?
+		;rjmp PWM_loop_slow				;(2) We reached second half of 3khz duty cycle?
+		brts PWM_loop_slow				;1(2) Jump out if T flag is set (Compare Match)
+		dec pwm_counter					;1 count value for pin ON for Buzzer volume regulation
+		brne PWM_loop_fast				;2
+		mov pwm_counter, pwm_dutyfst	;1 initialize couner for remaining cycle
+		sub pwm_counter, pwm_volume		;1 adjust counter to correct value
+		cbi PORTB, BUZZ_Out 			;1 turn buzzer OFF
+PWM_loop_fast1:	; 4 cpu cycles per loop
+		;in tmp, TIFR0					;1
+		;sbrc tmp, OCF0A 				;3 compare match?
+		;rjmp PWM_loop_slow				;(2) We reached second half of 3khz duty cycle?
+		brts PWM_loop_slow				;1(2) Jump out if T flag is set (Compare Match)
+		dec pwm_counter					;1 count value for pin OFF for Buzzer volume regulation
+		brne PWM_loop_fast1				;2
+		rjmp PWM_loop					;2 loop untill exit by Timer Compare match
 ; no pin change in this loop, only wait for Compare match
-PWM_low:
+PWM_low:	; now second part of 3khz duty cycle
 		cbi PORTB, BUZZ_Out	; PWM in low state
-PWM_lw1:in tmp, TIFR0
-		sbrc tmp, OCF0A ; compare match?
-		rjmp PWM_loop_slow
+PWM_lw1:;in tmp, TIFR0
+		;sbrc tmp, OCF0A ; compare match?
+		;rjmp PWM_loop_slow
+		brts PWM_loop_slow				;1(2) Jump out if T flag is set (Compare Match)
 		; TODO: need to exit from all this looping when PWM should be off
 		cpse buz_on_cntr, z0
 		rjmp chck_pcint		; go to routine to check, does PC_int (pin change interrupt) occurs?
@@ -159,8 +163,9 @@ PWM_lw1:in tmp, TIFR0
 ; 3khz 50% duty cycle transition		
 PWM_loop_slow:		
 		inc pwm_pin		; toggle bit 0 in register
-		ldi tmp, (1 << OCF0A)
-		out TIFR0, tmp	; clear compare match flag manually
+		;ldi tmp, (1 << OCF0A)
+		;out TIFR0, tmp	; clear compare match flag manually
+		cbt				; clear T flag ("Compare Match" flag clear)
 		rjmp PWM_loop
 
 ; currently do nothing here
@@ -196,7 +201,10 @@ WDTiext:
 		out SREG, itmp_sreg
 		reti
 
+; sets T flag on timer compare match interrupt to speedup manual PWM routine
+; routine in the interrupts vector
 ;TmrC_int:
+;		set	; set T flag. No other flags in SREG is affected
 ;		reti		
 	
 		
