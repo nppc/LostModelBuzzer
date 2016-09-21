@@ -7,8 +7,9 @@
 ; r0 is allways 0 for cpse commands
 ;.def	itmp		= r1	; interrupts temp register
 ;.def	itmp1		= r2	; interrupts temp register
-.def	itmp_sreg	= r3	; storage for SREG in interrupts
-.def	buz_on_cntr	= r4	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
+.def	z0			= r24	; zero reg
+.def	itmp_sreg	= r22	; storage for SREG in interrupts
+.def	buz_on_cntr	= r23	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
 .def	tmp			= r16 	; general temp register
 .def	tmp1		= r17 	; general temp register
 .def	pwm_volume	= r18	; range: 1-19. Variable that sets the volume of buzzer (intervalk when BUZZ_Out in fast PWM is HIGH)
@@ -94,7 +95,7 @@ RESET:
 		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
 		ldi pwm_volume, 1	; 1-19 value for volume PWM (high freq PWM)
 		clr	buz_on_cntr
-		clr r0
+		clr z0
 		
 		sei ; Enable interrupts
 
@@ -109,8 +110,8 @@ MAIN_loop:
 		; Set OCR0A to 645 - about 3khz at 4mhz clock (50% duty cycle)
 		dec buz_on_cntr ; load 255 to the buzzer counter (about 84ms)
 		cli
-		out TCNT0H, r0	; reset timer just in case...
-		out TCNT0L, r0
+		out TCNT0H, z0	; reset timer just in case...
+		out TCNT0L, z0
 		ldi tmp1,high(TMR_COMP_VAL)
 		ldi tmp,low(TMR_COMP_VAL)
 		out OCR0AH,tmp1
@@ -150,7 +151,7 @@ PWM_lw1:in tmp, TIFR0
 		sbrc tmp, OCF0A ; compare match?
 		rjmp PWM_loop_slow
 		; TODO: need to exit from all this looping when PWM should be off
-		cpse buz_on_cntr, r0
+		cpse buz_on_cntr, z0
 		rjmp chck_pcint		; go to routine to check, does PC_int (pin change interrupt) occurs?
 		dec buz_on_cntr		; dec counter for buzzer
 		breq PWM_loop_exit	; Stop Buzzer beep
