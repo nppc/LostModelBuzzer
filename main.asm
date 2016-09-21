@@ -4,6 +4,17 @@
 
 .EQU	TMR_COMP_VAL = 645	; about 3.1 khz (50% duty cycle) at 4mhz clock source
 
+; r0 is allways 0 for cpse commands
+;.def	itmp		= r1	; interrupts temp register
+;.def	itmp1		= r2	; interrupts temp register
+.def	itmp_sreg	= r3	; storage for SREG in interrupts
+.def	buz_on_cntr	= r4	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
+.def	tmp			= r16 	; general temp register
+.def	tmp1		= r17 	; general temp register
+.def	pwm_volume	= r18	; range: 1-19. Variable that sets the volume of buzzer (intervalk when BUZZ_Out in fast PWM is HIGH)
+.def	pwm_counter	= r19	; just a counter for fast PWM duty cycle
+.def	pwm_pin		= r20	; bit indicates the state of 3khz duty cycle (1-1st half, 0-2nd half)
+.def	pwm_dutyfst	= r21	; const value 20. Duty cycle len for fast PWM
 ; r30 has the flag (no sound)
 
 .CSEG
@@ -23,122 +34,142 @@
 RESET: 	
 		; first determine why we are here (by power-on or by reset pin goes to low)
 		clr r30
-		in r16, RSTFLR
-		sbrc r16, EXTRF ; skip next command if reset occurs not by external reset
+		in tmp, RSTFLR
+		sbrc tmp, EXTRF ; skip next command if reset occurs not by external reset
 		ldi r30, 1 ; we should produce no sound until full power restored (ADC reads 5 volts or more)
-		clr r16
-		out RSTFLR, r16	; reset all reset flags 
+		clr tmp
+		out RSTFLR, tmp	; reset all reset flags 
 		
-		ldi r16, 	(1 << BUZZ_Out)	; set pin as output
-		out DDRB,	r16				; all other pins will be inputs		
-		ldi r16, 	(1 << BUZZ_Inp)	; enable pull-up to protect floating input when no power on FC
-		out PUEB,	r16				; 
-		clr	r16
-		out PORTB, r16				; all pins to LOW
+		ldi tmp, 	(1 << BUZZ_Out)	; set pin as output
+		out DDRB,	tmp				; all other pins will be inputs		
+		ldi tmp, 	(1 << BUZZ_Inp)	; enable pull-up to protect floating input when no power on FC
+		out PUEB,	tmp				; 
+		clr	tmp
+		out PORTB, tmp				; all pins to LOW
 
-		ldi r16, high (RAMEND) ; Main program start
-		out SPH,r16 ; Set Stack Pointer
-		ldi r16, low (RAMEND) ; to top of RAM
-		out SPL,r16
+		ldi tmp, high (RAMEND) ; Main program start
+		out SPH,tmp ; Set Stack Pointer
+		ldi tmp, low (RAMEND) ; to top of RAM
+		out SPL,tmp
 
 		; 4Mhz (Leave internal 8 mhz osc with prescaler 2)
 		; Write signature for change enable of protected I/O register
-		ldi r16, 0xD8
-		out CCP, r16
-		ldi r16, (0 << CLKPS3) | (0 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 2 (4mhz)
-		out  CLKPSR, r16
+		ldi tmp, 0xD8
+		out CCP, tmp
+		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 2 (4mhz)
+		out  CLKPSR, tmp
 		; configure watchdog
 		;rcall WDT_On ; start watchdog timer...
 		
 		;***** POWER SAVINGS *****
 		; disable analog comparator
-		ldi	r16, (1 << ACD)	; analog comp. disable
-		out ACSR, r16			; disable power to analog comp.
+		ldi	tmp, (1 << ACD)	; analog comp. disable
+		out ACSR, tmp			; disable power to analog comp.
 
 		; Configure Pin Change interrupt for BUZZER input
-		ldi r16, 	(1 << BUZZ_Inp)
-		out PCMSK, 	r16	; configure pin for ext interrupt
-		ldi r16, 	0x01
-		out PCICR, 	r16	; pin change interrupt enable
+		ldi tmp, 	(1 << BUZZ_Inp)
+		out PCMSK, 	tmp	; configure pin for ext interrupt
+		ldi tmp, 	0x01
+		out PCICR, 	tmp	; pin change interrupt enable
 
 		; Disable digital pin buffer
-		ldi r16, 	(1 << ADC_Inp)
-		out DIDR0, 	r16	
+		ldi tmp, 	(1 << ADC_Inp)
+		out DIDR0, 	tmp	
 		;***** END OF POWER SAVINGS *****
-		#ifndef _TN9DEF_INC_
+#ifndef _TN9DEF_INC_
 		; Enable and configure ADC
-		ldi r16, (1 << MUX1) | (0 << MUX0)	; PB2 as ADC input
-		out ADMUX, r16
+		ldi tmp, (1 << MUX1) | (0 << MUX0)	; PB2 as ADC input
+		out ADMUX, tmp
 		rcall ADC_start ; run empty ADC read
-		#endif
+#endif
 		; configure timer 0 to work in CTC mode (4), no prescaler, enable compare interrupt
-		ldi r16, 0
-		out TCCR0A, r16
-		ldi r16, (1 << WGM02) | (1 << CS00)
-		out TCCR0B, r16
-		ldi r16, (0 << OCIE0A) ; currently disable compare interrupt (seems it is faster to take care of it manually)
-		out TIMSK0, r16
+		ldi tmp, 0
+		out TCCR0A, tmp
+		ldi tmp, (1 << WGM02) | (1 << CS00)
+		out TCCR0B, tmp
+		ldi tmp, (0 << OCIE0A) ; currently disable compare interrupt (seems it is faster to take care of it manually)
+		out TIMSK0, tmp
+		
+		; initialize variables
+		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
+		ldi pwm_volume, 1	; 1-19 value for volume PWM (high freq PWM)
+		clr	buz_on_cntr
+		clr r0
 		
 		sei ; Enable interrupts
 
 ;******* MAIN LOOP *******	
 MAIN_loop:
+		rcall WDT_On ; reset watchdog timer for 1 seconds
+
+; ***** MANUAL PWM ROUTINE ******
 		; testing timer and PWM
 		; initialize PWM generation registers
 		; load Compare register to get 3khz
 		; Set OCR0A to 645 - about 3khz at 4mhz clock (50% duty cycle)
-		clr r16
+		dec buz_on_cntr ; load 255 to the buzzer counter (about 84ms)
 		cli
-		out TCNT0H, r16	; reset timer just in case...
-		out TCNT0L, r16
-		ldi r17,high(TMR_COMP_VAL)
-		ldi r16,low(TMR_COMP_VAL)
-		out OCR0AH,r17
-		out OCR0AL,r16
+		out TCNT0H, r0	; reset timer just in case...
+		out TCNT0L, r0
+		ldi tmp1,high(TMR_COMP_VAL)
+		ldi tmp,low(TMR_COMP_VAL)
+		out OCR0AH,tmp1
+		out OCR0AL,tmp
 		sei
-		
-		ldi r20, 1	; pin state (bit 0 - on/off)
-		; r19 is a counter here
-		ldi r17, 20	; total len of duty cycle of fast PWM
-		ldi r18, 8	; value for volume PWM (high freq PWM)
+
+		ldi pwm_pin, 1	; pin state (bit 0 - on/off)
+		; pwm_counter is a counter here
 PWM_loop:
-		; check r20 for main PWM, should we be low, or fast PWM?
-		sbrs r20, 0	; check bit 0
+		; check pwm_pin for main PWM, should we be low, or fast PWM?
+		sbrs pwm_pin, 0	; check bit 0
 		rjmp PWM_low ; no pin activity on second half of 3khz duty cycle
 		; lets toggle fast Buzzer pin while we in first half of 3khz duty cycle
-		clr r19		; counter for fast PWM
+		clr pwm_counter		; counter for fast PWM
 		; Fast PWM
 		sbi PORTB, BUZZ_Out ; turn buzzer ON
 PWM_loop_fast:
-		in r16, TIFR0
-		sbrc r16, OCF0A ; compare match?
+		in tmp, TIFR0
+		sbrc tmp, OCF0A ; compare match?
 		rjmp PWM_loop_slow	; We reached second half of 3khz duty cycle?
-		inc	r19				; count value for pin ON for Buzzer volume regulation
-		cpse r19, r18	; need to go low. Go out of the loop if values is equal
+		inc	pwm_counter				; count value for pin ON for Buzzer volume regulation
+		cpse pwm_counter, pwm_volume	; need to go low. Go out of the loop if values is equal
 		rjmp PWM_loop_fast
 		cbi PORTB, BUZZ_Out ; turn buzzer OFF
 PWM_loop_fast1:		
-		inc	r19			; continue to count while buzzer pin is off in fast PWM
-		cpse r19, r17	; go out of the loop if values is equal
+		in tmp, TIFR0
+		sbrc tmp, OCF0A ; compare match?
+		rjmp PWM_loop_slow	; We reached second half of 3khz duty cycle?
+		inc	pwm_counter			; continue to count while buzzer pin is off in fast PWM
+		cpse pwm_counter, pwm_dutyfst	; go out of the loop if values is equal
 		rjmp PWM_loop_fast1
 		rjmp PWM_loop	; loop untill exit by Timer Compare match
 ; no pin change in this loop, only wait for Compare match
 PWM_low:
 		cbi PORTB, BUZZ_Out	; PWM in low state
-PWM_lw1:in r16, TIFR0
-		sbrc r16, OCF0A ; compare match?
+PWM_lw1:in tmp, TIFR0
+		sbrc tmp, OCF0A ; compare match?
 		rjmp PWM_loop_slow
 		; TODO: need to exit from all this looping when PWM should be off
-		rjmp PWM_lw1 ; ptherwise just wait here. 
+		cpse buz_on_cntr, r0
+		rjmp chck_pcint		; go to routine to check, does PC_int (pin change interrupt) occurs?
+		dec buz_on_cntr		; dec counter for buzzer
+		breq PWM_loop_exit	; Stop Buzzer beep
+		rjmp PWM_lw1 ; otherwise just wait here. 
 ; 3khz 50% duty cycle transition		
 PWM_loop_slow:		
-		inc r20		; toggle bit 0 in register
-		ldi r16, (1 << OCF0A)
-		out TIFR0, r16	; clear compare match flag manually
+		inc pwm_pin		; toggle bit 0 in register
+		ldi tmp, (1 << OCF0A)
+		out TIFR0, tmp	; clear compare match flag manually
 		rjmp PWM_loop
+
+; currently do nothing here
+chck_pcint:		
+		rjmp PWM_lw1
+; here we finish our handmade PWM routine for buzzer.
+PWM_loop_exit:
+	; ***** END OF MANUAL PWM ROUTINE ******
 		
 		
-		rcall WDT_On ; reset watchdog timer for 8 seconds
 		rcall GO_sleep ; stops here until wake-up event occurs
 		; After waking up we need to read ADC for 2 reasons.
 		; 1. We want to know the VCC voltage to adjust PWM to the BUZZER.
@@ -153,7 +184,15 @@ PWM_loop_slow:
 PC_int:
 		reti
 		
+; test routine for volume change
 WDT_int:
+		in itmp_sreg, SREG
+		inc pwm_volume
+		cp pwm_volume, pwm_dutyfst	; compare to max value for volume allowed (1-19)
+		brlo WDTiext ; exit if no counter reset needed
+		ldi pwm_volume, 1	; reset volume counter
+WDTiext:
+		out SREG, itmp_sreg
 		reti
 
 ;TmrC_int:
@@ -163,21 +202,22 @@ WDT_int:
 WDT_On:
 		wdr					; reset the WDT
 		; Clear WDRF in RSTFLR
-		in r16, RSTFLR
-		andi r16, ~(1<<WDRF)
-		out RSTFLR, r16		; Write signature for change enable of protected I/O register
-		ldi r16, 0xD8
-		out CCP, r16
-		ldi r16, (0<<WDE) | (1<<WDIE) | (1 << WDP0) | (0 << WDP1) | (0 << WDP2) | (1 << WDP3) | (1<<WDIF) ; 8 sec, interrupt enable
-		out  WDTCSR, r16
+		in tmp, RSTFLR
+		andi tmp, ~(1<<WDRF)
+		out RSTFLR, tmp		; Write signature for change enable of protected I/O register
+		ldi tmp, 0xD8
+		out CCP, tmp
+		;ldi tmp, (0<<WDE) | (1<<WDIE) | (1 << WDP0) | (0 << WDP1) | (0 << WDP2) | (1 << WDP3) | (1<<WDIF) ; 8 sec, interrupt enable
+		ldi tmp, (0<<WDE) | (1<<WDIE) | (0 << WDP0) | (1 << WDP1) | (1 << WDP2) | (0 << WDP3) | (1<<WDIF) ; 1 sec, interrupt enable
+		out  WDTCSR, tmp
 		wdr
 		ret	; End WDT_On
 		
 
 GO_sleep:
 		; Configure Sleep Mode
-		ldi r16, (1<<SE) | (0<<SM2) | (1<<SM1) | (0<<SM0)	; enable power down sleep mode
-		out SMCR, r16
+		ldi tmp, (1<<SE) | (0<<SM2) | (1<<SM1) | (0<<SM0)	; enable power down sleep mode
+		out SMCR, tmp
 		SLEEP
 		; stops here until wake-up event occurs
 		ret
@@ -185,10 +225,10 @@ GO_sleep:
 ; Configures ADC, starts conversion, waits for result...
 ; returns result in r17		
 ADC_start:
-		ldi r16, (0 << PRADC)
-		out PRR, r16
-		ldi r16, (1 << ADEN) | (1 << ADSC) | (0 << ADATE) | (1 << ADIF) | (0 <<  ADIE) ; prescaler 2, auto disabled
-		out ADCSRA, r16
+		ldi tmp, (0 << PRADC)
+		out PRR, tmp
+		ldi tmp, (1 << ADEN) | (1 << ADSC) | (0 << ADATE) | (1 << ADIF) | (0 <<  ADIE) ; prescaler 2, auto disabled
+		out ADCSRA, tmp
 		; wait for adc finish
 WaitAdc1:
 		; check ADSC bit, conversion complete if bit is zero
@@ -197,10 +237,10 @@ WaitAdc1:
 		; read MSB of the AD conversion result
 		in r17, ADCL
 		; switch AD converter off
-		ldi r16, (0<<ADEN) ; switch ADC off
+		ldi tmp, (0<<ADEN) ; switch ADC off
 		out ADCSRA, rmp		
-		ldi r16, (1 << PRADC)
-		out PRR, r16
+		ldi tmp, (1 << PRADC)
+		out PRR, tmp
 		ret
 #endif
 		
