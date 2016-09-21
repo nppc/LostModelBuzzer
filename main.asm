@@ -2,17 +2,22 @@
 .EQU	BUZZ_Inp	= PB1	; BUZZER Input from FC 
 .EQU	ADC_Inp		= PB2	; is an analog input for voltage sensing
 
-.EQU	TMR_COMP_VAL = 645	; about 3.1 khz (50% duty cycle) at 4mhz clock source
+.EQU	TMR_COMP_VAL = 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
 
+.undef ZL
+.undef ZH
 ; r0-r15 is not available in this tiny mcu series.
 .def	tmp			= r16 	; general temp register
 .def	tmp1		= r17 	; general temp register
 .def	pwm_volume	= r18	; range: 1-19. Variable that sets the volume of buzzer (intervalk when BUZZ_Out in fast PWM is HIGH)
 .def	pwm_counter	= r19	; just a counter for fast PWM duty cycle
-.def	pwm_pin		= r20	; bit indicates the state of 3khz duty cycle (1-1st half, 0-2nd half)
-.def	pwm_dutyfst	= r21	; const value 20. Duty cycle len for fast PWM
-.def	buz_on_cntr	= r22	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
+.def	pwm_dutyfst	= r20	; const value 20. Duty cycle len for fast PWM
+.def	buz_on_cntr	= r21	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
+.def	adc_val		= r22	; Here we allways have fresh voltage reading value
 .def	itmp_sreg	= r23	; storage for SREG in interrupts
+.def	tcompL		= r24
+.def	tcompH		= r25
+
 ;.def	itmp		= r24	; interrupts temp register
 ;.def	itmp1		= r25	; interrupts temp register
 .def	mute_buzz	= r30	; flag indicates that we need to mute buzzer (after reset manually pressed).
@@ -39,6 +44,15 @@ RESET:
 		in tmp, RSTFLR
 		sbrc tmp, EXTRF ; skip next command if reset occurs not by external reset
 		ldi mute_buzz, 1 ; we should produce no sound until full power restored (ADC reads 5 volts or more)
+
+		; initialize variables
+		clr z0				; general 0 value register
+		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
+		ldi pwm_volume, 19	; 1-19 value for volume PWM (high freq PWM)
+		clr	buz_on_cntr
+		ldi tcompL, low(TMR_COMP_VAL)
+		ldi	tcompH, high(TMR_COMP_VAL)
+
 		out RSTFLR, z0	; reset all reset flags 
 		
 		ldi tmp, 	(1 << BUZZ_Out)	; set pin as output
@@ -69,8 +83,9 @@ RESET:
 		; Configure Pin Change interrupt for BUZZER input
 		ldi tmp, 	(1 << BUZZ_Inp)
 		out PCMSK, 	tmp	; configure pin for ext interrupt
-		ldi tmp, 	0x01
-		out PCICR, 	tmp	; pin change interrupt enable
+		;ldi tmp, 	(1 << PCIE0)
+		;out PCICR, 	tmp	; pin change interrupt enable
+		sbi PCICR, PCIE0	; pin change interrupt enable
 
 		; Disable digital pin buffer
 		ldi tmp, 	(1 << ADC_Inp)
@@ -83,20 +98,16 @@ RESET:
 		rcall ADC_start ; run empty ADC read
 #endif
 		; configure timer 0 to work in CTC mode (4), no prescaler, enable compare interrupt
-		ldi tmp, 0
-		out TCCR0A, tmp
+		out TCCR0A, z0
 		ldi tmp, (1 << WGM02) | (1 << CS00)
 		out TCCR0B, tmp
 		ldi tmp, (1 << OCIE0A) ; enable compare interrupt and set in the interrupt routine T flag
 		out TIMSK0, tmp
-		clt				; clear T flag for the Compare interrupt
-		
-		; initialize variables
-		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
-		ldi pwm_volume, 1	; 1-19 value for volume PWM (high freq PWM)
-		clr	buz_on_cntr
-		clr z0
-		
+		; disable timer0 for now
+		in tmp, PRR
+		cbr tmp, PRTIM0
+		out PRR, tmp
+				
 		sei ; Enable interrupts
 
 ;******* MAIN LOOP *******	
@@ -108,80 +119,15 @@ MAIN_loop:
 		; initialize PWM generation registers
 		; load Compare register to get 3khz
 		; Set OCR0A to 645 - about 3khz at 4mhz clock (50% duty cycle)
-		dec buz_on_cntr ; load 255 to the buzzer counter (about 84ms)
-		cli
-		out TCNT0H, z0	; reset timer just in case...
-		out TCNT0L, z0
-		ldi tmp1,high(TMR_COMP_VAL)
-		ldi tmp,low(TMR_COMP_VAL)
-		out OCR0AH,tmp1
-		out OCR0AL,tmp
-		clt		; clear T flag
-		sei
-
-		ldi pwm_pin, 1	; pin state (bit 0 - on/off)
-		; pwm_counter is a counter here
-PWM_loop:
-		; check pwm_pin for main PWM, should we be low, or fast PWM?
-		sbrs pwm_pin, 0					;3 check bit 0
-		rjmp PWM_low 					;(2) no pin activity on second half of 3khz duty cycle
-		; lets toggle fast Buzzer pin while we in first half of 3khz duty cycle
-		; Fast PWM
-		sbi PORTB, BUZZ_Out 			;1 turn buzzer ON
-		mov pwm_counter, pwm_volume		; Initialize counter
-PWM_loop_fast: ; 4 cpu cycles per loop
-		;in tmp, TIFR0					;1
-		;sbrc tmp, OCF0A 				;3 compare match?
-		;rjmp PWM_loop_slow				;(2) We reached second half of 3khz duty cycle?
-		brts PWM_loop_slow				;1(2) Jump out if T flag is set (Compare Match)
-		dec pwm_counter					;1 count value for pin ON for Buzzer volume regulation
-		brne PWM_loop_fast				;2
-		mov pwm_counter, pwm_dutyfst	;1 initialize couner for remaining cycle
-		sub pwm_counter, pwm_volume		;1 adjust counter to correct value
-		cbi PORTB, BUZZ_Out 			;1 turn buzzer OFF
-PWM_loop_fast1:	; 4 cpu cycles per loop
-		;in tmp, TIFR0					;1
-		;sbrc tmp, OCF0A 				;3 compare match?
-		;rjmp PWM_loop_slow				;(2) We reached second half of 3khz duty cycle?
-		brts PWM_loop_slow				;1(2) Jump out if T flag is set (Compare Match)
-		dec pwm_counter					;1 count value for pin OFF for Buzzer volume regulation
-		brne PWM_loop_fast1				;2
-		rjmp PWM_loop					;2 loop untill exit by Timer Compare match
-; no pin change in this loop, only wait for Compare match
-PWM_low:	; now second part of 3khz duty cycle
-		cbi PORTB, BUZZ_Out	; PWM in low state
-PWM_lw1:;in tmp, TIFR0
-		;sbrc tmp, OCF0A ; compare match?
-		;rjmp PWM_loop_slow
-		brts PWM_loop_slow				;1(2) Jump out if T flag is set (Compare Match)
-		; TODO: need to exit from all this looping when PWM should be off
-		cpse buz_on_cntr, z0
-		rjmp chck_pcint		; go to routine to check, does PC_int (pin change interrupt) occurs?
-		dec buz_on_cntr		; dec counter for buzzer
-		breq PWM_loop_exit	; Stop Buzzer beep
-		rjmp PWM_lw1 ; otherwise just wait here. 
-; 3khz 50% duty cycle transition		
-PWM_loop_slow:		
-		inc pwm_pin		; toggle bit 0 in register
-		;ldi tmp, (1 << OCF0A)
-		;out TIFR0, tmp	; clear compare match flag manually
-		cbt				; clear T flag ("Compare Match" flag clear)
-		rjmp PWM_loop
-
-; currently do nothing here
-chck_pcint:		
-		rjmp PWM_lw1
-; here we finish our handmade PWM routine for buzzer.
-PWM_loop_exit:
-	; ***** END OF MANUAL PWM ROUTINE ******
-		
+		ldi buz_on_cntr, 255 ; load 255 to the buzzer counter (about 84ms)
+		rcall BEEP
 		
 		rcall GO_sleep ; stops here until wake-up event occurs
 		; After waking up we need to read ADC for 2 reasons.
 		; 1. We want to know the VCC voltage to adjust PWM to the BUZZER.
 		; 2. We need to determine VCC loss (FC powered off), to enable BEAKON mode.
 		#ifndef _TN9DEF_INC_
-		rcall ADC_start ; read ADC value to r17
+		rcall ADC_start ; read ADC value to adc_val
 		#endif
 		
 		rjmp MAIN_loop 
@@ -193,10 +139,12 @@ PC_int:
 ; test routine for volume change
 WDT_int:
 		in itmp_sreg, SREG
-		inc pwm_volume
-		cp pwm_volume, pwm_dutyfst	; compare to max value for volume allowed (1-19)
-		brlo WDTiext ; exit if no counter reset needed
-		ldi pwm_volume, 1	; reset volume counter
+		;inc pwm_volume
+		;cp pwm_volume, pwm_dutyfst	; compare to max value for volume allowed (1-19)
+		;brlo WDTiext ; exit if no counter reset needed
+		;ldi pwm_volume, 1	; reset volume counter
+		;subi tcompL, 2
+		;sbc tcompH, z0
 WDTiext:
 		out SREG, itmp_sreg
 		reti
@@ -230,26 +178,103 @@ GO_sleep:
 		SLEEP
 		; stops here until wake-up event occurs
 		ret
+		
 #ifndef _TN9DEF_INC_		
 ; Configures ADC, starts conversion, waits for result...
-; returns result in r17		
+; returns result in adc_val		
 ADC_start:
-		ldi tmp, (0 << PRADC)
+		; enable ADC
+		in tmp, PRR
+		cbr tmp, PRADC
 		out PRR, tmp
-		ldi tmp, (1 << ADEN) | (1 << ADSC) | (0 << ADATE) | (1 << ADIF) | (0 <<  ADIE) ; prescaler 2, auto disabled
+		ldi tmp, (1 << ADEN) | (1 << ADSC) | (0 << ADATE) | (1 << ADIF) | (0 <<  ADIE) | (0 <<  ADPS2) | (1 <<  ADPS1) | (1 <<  ADPS0) ; prescaler 8, auto disabled
 		out ADCSRA, tmp
-		; wait for adc finish
 WaitAdc1:
 		; check ADSC bit, conversion complete if bit is zero
 		sbic ADCSRA, ADSC ; conversion ready?
 		rjmp WaitAdc1 ; not yet
-		; read MSB of the AD conversion result
-		in r17, ADCL
+		; read AD conversion result
+		in adc_val, ADCL
+		; start second (clean) reading...
+		out ADCSRA, tmp
+WaitAdc2:
+		; check ADSC bit, conversion complete if bit is zero
+		sbic ADCSRA, ADSC ; conversion ready?
+		rjmp WaitAdc2 ; not yet
+		; read AD conversion result
+		in adc_val, ADCL
 		; switch AD converter off
-		ldi tmp, (0<<ADEN) ; switch ADC off
-		out ADCSRA, rmp		
+		out ADCSRA, z0
 		ldi tmp, (1 << PRADC)
 		out PRR, tmp
 		ret
 #endif
 		
+; Beep the buzzer.
+;variable buz_on_cntr determines, will routine beep until PCINT cbange interrupt (0 value), or short beep - max 84ms (255 value)
+BEEP:
+		; enable timer0
+		in tmp, PRR
+		sbr tmp, PRTIM0
+		out PRR, tmp
+		cli
+		mov tmp1, tcompH
+		mov tmp, tcompL
+		sei
+		out OCR0AH,tmp1
+		out OCR0AL,tmp
+		out TCNT0H, z0	; reset timer just in case...
+		out TCNT0L, z0
+		clt		; clear T flag
+
+		; pwm_counter is a counter here
+PWM_loop:
+		; lets toggle fast Buzzer pin while we in first half of 3khz duty cycle
+		; Fast PWM
+		sbi PORTB, BUZZ_Out 			;1 turn buzzer ON
+		mov pwm_counter, pwm_volume		; Initialize counter
+PWM_loop_fast: ; 4 cpu cycles per loop
+		brts PWM_low					;1(2) Jump out if T flag is set (Compare Match)
+		dec pwm_counter					;1 count value for pin ON for Buzzer volume regulation
+		brne PWM_loop_fast				;2
+		
+		mov pwm_counter, pwm_dutyfst	;1 initialize couner for remaining cycle
+		sub pwm_counter, pwm_volume		;1 adjust counter to correct value
+		cbi PORTB, BUZZ_Out 			;1 turn buzzer OFF
+PWM_loop_fast1:	; 4 cpu cycles per loop
+		brts PWM_low					;1(2) Jump out if T flag is set (Compare Match)
+		dec pwm_counter					;1 count value for pin OFF for Buzzer volume regulation
+		brne PWM_loop_fast1				;2
+		rjmp PWM_loop					;2 loop untill exit by Timer Compare match
+; no pin change in this loop, only wait for Compare match
+PWM_low:	; now second part of 3khz duty cycle
+		cbi PORTB, BUZZ_Out	; PWM in low state
+		clt		; reset timer capture match flag
+		; here we can call ADC read routine once to update voltage readings...
+		#ifndef _TN9DEF_INC_
+		rcall ADC_start		; we have plenty of time here, so, lets read ADC...
+		#endif
+PWM_lw1:
+		brts PWM_loop_cycle_end				;1(2) Jump out if T flag is set (Compare Match)
+		rjmp PWM_lw1 ; otherwise just wait here. 
+; 3khz 50% duty cycle transition		
+PWM_loop_cycle_end:	; we come here after every timer compare match interrupt	
+		clt				; clear T flag ("Compare Match" flag clear)
+		cp buz_on_cntr, z0
+		breq chck_pcint		; go to routine to check, does PC_int (pin change interrupt) occurs?
+		dec buz_on_cntr
+		breq PWM_loop_exit	; Stop Buzzer beep
+		rjmp PWM_loop
+
+; currently do nothing here
+chck_pcint:		
+		; we also need to check voltage readings for voltage drop, if, for example, power will be disconnected while beep...
+		rjmp PWM_loop
+; here we finish our handmade PWM routine for buzzer.
+PWM_loop_exit:
+		; disable the timer
+		in tmp, PRR
+		cbr tmp, PRTIM0
+		out PRR, tmp
+; ***** END OF MANUAL PWM ROUTINE ******
+ret
