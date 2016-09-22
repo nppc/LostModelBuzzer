@@ -9,9 +9,9 @@
 ; r0-r15 is not available in this tiny mcu series.
 .def	tmp			= r16 	; general temp register
 .def	tmp1		= r17 	; general temp register
-.def	pwm_volume	= r18	; range: 1-19. Variable that sets the volume of buzzer (intervalk when BUZZ_Out in fast PWM is HIGH)
-.def	pwm_counter	= r19	; just a counter for fast PWM duty cycle
-.def	pwm_dutyfst	= r20	; const value 20. Duty cycle len for fast PWM
+.def	pwm_volume	= r18	; range: 1-20. Variable that sets the volume of buzzer (interval when BUZZ_Out in fast PWM is HIGH)
+.def	pwm_dutyfst	= r19	; const value 20. Duty cycle len for fast PWM
+.def	pwm_counter	= r20	; just a counter for fast PWM duty cycle
 .def	buz_on_cntr	= r21	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
 .def	adc_val		= r22	; Here we allways have fresh voltage reading value
 .def	itmp_sreg	= r23	; storage for SREG in interrupts
@@ -23,6 +23,10 @@
 .def	mute_buzz	= r30	; flag indicates that we need to mute buzzer (after reset manually pressed).
 .def	z0			= r31	; zero reg
 ; r30 has the flag (no sound)
+
+.DSEG
+.ORG 0x0040	; start of SRAM data memory
+RST_OPTION: 	.BYTE 1	; store here count of reset presses after power-on to determine special modes of operation
 
 .CSEG
 		rjmp RESET 	; Reset Handler
@@ -37,23 +41,58 @@
 		reti		; Voltage Level Monitor Handler
 		reti		;rjmp ADC_int; ADC Conversion Handler
 
+RST_PRESSED: ; we came here when reset button is pressed
+		; logic will be:
+		; very first action - is just wait for 100ms for example, to eliminate noise on reset button
+		; beep shortly
+		; Then, increnet RST_OPTION variable and wait about 2 seconds in loop.
+		; if during that time RESET was pressed again, then variable will just increase.
+		; After 2 seconds of waiting check RST_OPTION variable and decide what to do.
+		; Currently I think about this options:
+		; 1. disable buzzer. After battery is disconnected, if user press reset, then it disables beakon functionality until batery is connected back.
+		; 2. configure LostModelBuzzer. with some 1wire simple protocol change parameters. (Actually just test them, then reflash, because of no EEPROM for config).
+		;    configurable: Buzzer freq, delay for start beakon after power loss, loudness of the buzzer (fixed or adjustad by voltage).
+		
+		lds tmp, RST_OPTION
+		inc tmp
+		sts RST_OPTION, tmp
 
+		rjmp PRG_CONT	; back to main program
+
+; start of the program
 RESET: 	
-		; first determine why we are here (by power-on or by reset pin goes to low)
-		clr mute_buzz
-		in tmp, RSTFLR
-		sbrc tmp, EXTRF ; skip next command if reset occurs not by external reset
-		ldi mute_buzz, 1 ; we should produce no sound until full power restored (ADC reads 5 volts or more)
+		; determine why we are here (by power-on or by reset pin goes to low)
+		in tmp1, RSTFLR	; tmp1 should not be changed til sbrc tmp1, EXTRF
+		
+		; 4Mhz (Leave 8 mhz osc with prescaler 2)
+		; Write signature for change enable of protected I/O register
+		ldi tmp, 0xD8
+		out CCP, tmp
+		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 2 (4mhz)
+		out  CLKPSR, tmp
 
+		ldi tmp, high (RAMEND) ; Main program start
+		out SPH,tmp ; Set Stack Pointer
+		ldi tmp, low (RAMEND) ; to top of RAM
+		out SPL,tmp
 		; initialize variables
 		clr z0				; general 0 value register
 		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
-		ldi pwm_volume, 19	; 1-19 value for volume PWM (high freq PWM)
-		clr	buz_on_cntr
+		ldi pwm_volume, 20	; 1-20 value for volume PWM (high freq PWM)
+		clr	buz_on_cntr		; default is beep until PCINT interrupt
+		; default Buzzer frequency
 		ldi tcompL, low(TMR_COMP_VAL)
 		ldi	tcompH, high(TMR_COMP_VAL)
 
 		out RSTFLR, z0	; reset all reset flags 
+
+		sbrc tmp1, EXTRF ; skip next command if reset occurs not by external reset
+		rjmp RST_PRESSED
+		;ldi mute_buzz, 1 ; we should produce no sound until full power restored (ADC reads 5 volts or more)
+		; here we should clear SRAM variable, that counts reset presses...
+		sts RST_OPTION, z0
+		
+PRG_CONT:
 		
 		ldi tmp, 	(1 << BUZZ_Out)	; set pin as output
 		out DDRB,	tmp				; all other pins will be inputs		
@@ -61,19 +100,8 @@ RESET:
 		out PUEB,	tmp				; 
 		out PORTB, z0				; all pins to LOW
 
-		ldi tmp, high (RAMEND) ; Main program start
-		out SPH,tmp ; Set Stack Pointer
-		ldi tmp, low (RAMEND) ; to top of RAM
-		out SPL,tmp
-
-		; 4Mhz (Leave internal 8 mhz osc with prescaler 2)
-		; Write signature for change enable of protected I/O register
-		ldi tmp, 0xD8
-		out CCP, tmp
-		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 2 (4mhz)
-		out  CLKPSR, tmp
 		; configure watchdog
-		;rcall WDT_On ; start watchdog timer...
+		;later...
 		
 		;***** POWER SAVINGS *****
 		; disable analog comparator
@@ -112,16 +140,14 @@ RESET:
 
 ;******* MAIN LOOP *******	
 MAIN_loop:
-		rcall WDT_On ; reset watchdog timer for 1 seconds
 
-; ***** MANUAL PWM ROUTINE ******
-		; testing timer and PWM
-		; initialize PWM generation registers
-		; load Compare register to get 3khz
-		; Set OCR0A to 645 - about 3khz at 4mhz clock (50% duty cycle)
 		ldi buz_on_cntr, 255 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
-		
+		rcall WDT_On_250ms
+		rcall GO_sleep ; stops here until wake-up event occurs
+		ldi buz_on_cntr, 255 ; load 255 to the buzzer counter (about 84ms)
+		rcall BEEP
+		rcall WDT_On_1s
 		rcall GO_sleep ; stops here until wake-up event occurs
 		; After waking up we need to read ADC for 2 reasons.
 		; 1. We want to know the VCC voltage to adjust PWM to the BUZZER.
@@ -155,18 +181,23 @@ WDTiext:
 ;		set	; set T flag. No other flags in SREG is affected
 ;		reti		
 	
-		
-WDT_On:
-		wdr					; reset the WDT
+
+WDT_On_250ms:
+		ldi tmp1, (0<<WDE) | (1<<WDIE) | (1<<WDIF) | (0 << WDP3) | (1 << WDP2) | (0 << WDP1) | (0 << WDP0) ; 0.25 sec, interrupt enable
+		rjmp WDT_On
+WDT_On_1s:
+		ldi tmp1, (0<<WDE) | (1<<WDIE) | (1<<WDIF) | (0 << WDP3) | (1 << WDP2) | (1 << WDP1) | (0 << WDP0) ; 1 sec, interrupt enable
+		rjmp WDT_On
+WDT_On_8s:
+		ldi tmp1, (0<<WDE) | (1<<WDIE) | (1<<WDIF) | (1 << WDP3) | (0 << WDP2) | (0 << WDP1) | (1 << WDP0) ; 8 sec, interrupt enable
+WDT_On:	wdr					; reset the WDT
 		; Clear WDRF in RSTFLR
 		in tmp, RSTFLR
 		andi tmp, ~(1<<WDRF)
 		out RSTFLR, tmp		; Write signature for change enable of protected I/O register
 		ldi tmp, 0xD8
 		out CCP, tmp
-		;ldi tmp, (0<<WDE) | (1<<WDIE) | (1 << WDP0) | (0 << WDP1) | (0 << WDP2) | (1 << WDP3) | (1<<WDIF) ; 8 sec, interrupt enable
-		ldi tmp, (0<<WDE) | (1<<WDIE) | (0 << WDP0) | (1 << WDP1) | (1 << WDP2) | (0 << WDP3) | (1<<WDIF) ; 1 sec, interrupt enable
-		out  WDTCSR, tmp
+		out  WDTCSR, tmp1	; preset register
 		wdr
 		ret	; End WDT_On
 		
@@ -217,12 +248,12 @@ BEEP:
 		in tmp, PRR
 		sbr tmp, PRTIM0
 		out PRR, tmp
+		; load Compare register to get 3khz
+		; Set OCR0A to 645 - about 3khz at 4mhz clock (50% duty cycle)
 		cli
-		mov tmp1, tcompH
-		mov tmp, tcompL
+		out OCR0AH,tcompH
+		out OCR0AL,tcompL
 		sei
-		out OCR0AH,tmp1
-		out OCR0AL,tmp
 		out TCNT0H, z0	; reset timer just in case...
 		out TCNT0L, z0
 		clt		; clear T flag
@@ -240,6 +271,7 @@ PWM_loop_fast: ; 4 cpu cycles per loop
 		
 		mov pwm_counter, pwm_dutyfst	;1 initialize couner for remaining cycle
 		sub pwm_counter, pwm_volume		;1 adjust counter to correct value
+		breq PWM_loop					;1(2) if volume at max (pwm_dutyfst=pwm_volume) then do not turn buzzer pin low.
 		cbi PORTB, BUZZ_Out 			;1 turn buzzer OFF
 PWM_loop_fast1:	; 4 cpu cycles per loop
 		brts PWM_low					;1(2) Jump out if T flag is set (Compare Match)
