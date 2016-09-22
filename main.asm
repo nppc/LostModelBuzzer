@@ -17,7 +17,7 @@
 .def	itmp_sreg	= r23	; storage for SREG in interrupts
 .def	tcompL		= r24
 .def	tcompH		= r25
-
+.def	onewire_d	= r26	; data from ICP routine (len of the signal)
 ;.def	itmp		= r24	; interrupts temp register
 ;.def	itmp1		= r25	; interrupts temp register
 .def	mute_buzz	= r30	; flag indicates that we need to mute buzzer (after reset manually pressed).
@@ -32,8 +32,8 @@ RST_OPTION: 	.BYTE 1	; store here count of reset presses after power-on to deter
 		rjmp RESET 	; Reset Handler
 		reti		;rjmp INT0 	; IRQ0 Handler
 		rjmp PC_int	; PCINT0 Handler
-		reti		; Timer0 Capture Handler
-		reti		; Timer0 Overflow Handler
+		reti		;rjmp TCAP_int; Timer0 Capture Handler
+		set			; Timer0 Overflow Handler try T flag first
 		set			; Timer0 Compare A Handler (save time for rcall). exits by next reti command
 		reti		; Timer0 Compare B Handler
 		reti		; Analog Comparator Handler
@@ -41,22 +41,94 @@ RST_OPTION: 	.BYTE 1	; store here count of reset presses after power-on to deter
 		reti		; Voltage Level Monitor Handler
 		reti		;rjmp ADC_int; ADC Conversion Handler
 
+;TCAP_int:	; SREG is not affected here
+;		in onewire_d, TCNT0L
+;		in onewire_d, TCNT0H	; we are interested in High byte only
+;		reti
+
 RST_PRESSED: ; we came here when reset button is pressed
 		; logic will be:
 		; very first action - is just wait for 100ms for example, to eliminate noise on reset button
-		; beep shortly
-		; Then, increnet RST_OPTION variable and wait about 2 seconds in loop.
+		; beep shortly n times
+		; Then, increment RST_OPTION variable and wait about 2 seconds in loop.
 		; if during that time RESET was pressed again, then variable will just increase.
 		; After 2 seconds of waiting check RST_OPTION variable and decide what to do.
 		; Currently I think about this options:
 		; 1. disable buzzer. After battery is disconnected, if user press reset, then it disables beakon functionality until batery is connected back.
 		; 2. configure LostModelBuzzer. with some 1wire simple protocol change parameters. (Actually just test them, then reflash, because of no EEPROM for config).
 		;    configurable: Buzzer freq, delay for start beakon after power loss, loudness of the buzzer (fixed or adjustad by voltage).
-		
+		rcall WAIT100MS
+		; increment counter
 		lds tmp, RST_OPTION
 		inc tmp
+		; loop if pressed too much times
+		cpi tmp, 3			; 3 is non existing mode
+		brne SKP_OPT_LOOP
+		ldi tmp, 1			; gp back to option 1
+SKP_OPT_LOOP:
 		sts RST_OPTION, tmp
-
+		; beep n times according to RST_OPTION
+L1_BUZ_RST:
+		push tmp
+		ldi buz_on_cntr, 100 ; load 100 to the buzzer counter (about 30ms)
+		rcall BEEP
+		rcall WAIT100MS
+		pop tmp
+		dec tmp
+		brne L1_BUZ_RST
+		;wait 2 seconds more...
+		ldi tmp, 40
+L1_RST_WAIT:
+		push tmp
+		rcall WAIT50MS
+		pop tmp
+		dec tmp
+		brne L1_RST_WAIT
+		
+		; now decide to what mode to go
+		; do we just turn off buzzer?
+		lds tmp, RST_OPTION
+		cpi tmp, 1
+		breq RST_BUZZ_OFF
+		; if no buzz off then go to 1 wire transfer mode
+		; TODO 1wire protocol
+		; configure timer0 for capturing 1w data
+		; TCCR0A, TCCR0B and TCCR0C is already configured
+		ldi tmp, (1 << TOIE0); enable Overflow interrupt 
+		out TIMSK0, tmp
+		ldi tmp, (1 <<ICF0); clear ICF flag
+		out TIFR0, tmp
+		clt		; clear T flag 
+		; enable timer0
+		in tmp, PRR
+		sbr tmp, PRTIM0
+		out PRR, tmp
+		; Now wait for data (first need to catch timer overflow, indicating that all transfers are finished)
+W1_L1:	; Oveflow will be indicated by T flag is set
+		brtc W1_L1		; loop here until overflow will come
+		clt				; reset overflow flag
+		; now wait for the first ICP, it will be the beginning of the first bit.		
+W1_L2:	brts W1_L1		; start over, overflow is came
+		in tmp, TIFR0
+		sbrs tmp, ICF0
+		rjmp W1_L2		; loop
+		; read ICP register
+		in onewire_d, ICR0L
+		in onewire_d, ICR0H	; we are interested in High byte only
+		ldi tmp, (1 <<ICF0)	; clear ICF flag
+		out TIFR0, tmp		; clear ICF flag
+		out TCNT0H, z0
+		out TCNT0L, z0
+		; timing to check
+		;4ms = 64
+		;6ms = 96
+		;9ms = 144
+		;11ms = 176
+		
+		
+		rjmp PRG_CONT	; back to main program
+RST_BUZZ_OFF:
+		ldi mute_buzz, 1
 		rjmp PRG_CONT	; back to main program
 
 ; start of the program
@@ -75,59 +147,27 @@ RESET:
 		out SPH,tmp ; Set Stack Pointer
 		ldi tmp, low (RAMEND) ; to top of RAM
 		out SPL,tmp
+
 		; initialize variables
 		clr z0				; general 0 value register
 		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
 		ldi pwm_volume, 20	; 1-20 value for volume PWM (high freq PWM)
 		clr	buz_on_cntr		; default is beep until PCINT interrupt
+		clr mute_buzz		; by default buzzer is ON
 		; default Buzzer frequency
 		ldi tcompL, low(TMR_COMP_VAL)
 		ldi	tcompH, high(TMR_COMP_VAL)
 
-		out RSTFLR, z0	; reset all reset flags 
-
-		sbrc tmp1, EXTRF ; skip next command if reset occurs not by external reset
-		rjmp RST_PRESSED
-		;ldi mute_buzz, 1 ; we should produce no sound until full power restored (ADC reads 5 volts or more)
-		; here we should clear SRAM variable, that counts reset presses...
-		sts RST_OPTION, z0
-		
-PRG_CONT:
-		
+		; configure pins
 		ldi tmp, 	(1 << BUZZ_Out)	; set pin as output
 		out DDRB,	tmp				; all other pins will be inputs		
 		ldi tmp, 	(1 << BUZZ_Inp)	; enable pull-up to protect floating input when no power on FC
 		out PUEB,	tmp				; 
 		out PORTB, z0				; all pins to LOW
 
-		; configure watchdog
-		;later...
-		
-		;***** POWER SAVINGS *****
-		; disable analog comparator
-		ldi	tmp, (1 << ACD)	; analog comp. disable
-		out ACSR, tmp			; disable power to analog comp.
-
-		; Configure Pin Change interrupt for BUZZER input
-		ldi tmp, 	(1 << BUZZ_Inp)
-		out PCMSK, 	tmp	; configure pin for ext interrupt
-		;ldi tmp, 	(1 << PCIE0)
-		;out PCICR, 	tmp	; pin change interrupt enable
-		sbi PCICR, PCIE0	; pin change interrupt enable
-
-		; Disable digital pin buffer
-		ldi tmp, 	(1 << ADC_Inp)
-		out DIDR0, 	tmp	
-		;***** END OF POWER SAVINGS *****
-#ifndef _TN9DEF_INC_
-		; Enable and configure ADC
-		ldi tmp, (1 << MUX1) | (0 << MUX0)	; PB2 as ADC input
-		out ADMUX, tmp
-		rcall ADC_start ; run empty ADC read
-#endif
-		; configure timer 0 to work in CTC mode (4), no prescaler, enable compare interrupt
+		; configure timer 0 to work in CTC mode (4), no prescaler
 		out TCCR0A, z0
-		ldi tmp, (1 << WGM02) | (1 << CS00)
+		ldi tmp, (1 << ICNC0) | (0 << ICES0) | (1 << WGM02) | (1 << CS00) ; also preconfigure ICP mode
 		out TCCR0B, tmp
 		ldi tmp, (1 << OCIE0A) ; enable compare interrupt and set in the interrupt routine T flag
 		out TIMSK0, tmp
@@ -135,9 +175,40 @@ PRG_CONT:
 		in tmp, PRR
 		cbr tmp, PRTIM0
 		out PRR, tmp
-				
+
+				;***** POWER SAVINGS *****
+		; disable analog comparator
+		ldi	tmp, (1 << ACD)	; analog comp. disable
+		out ACSR, tmp			; disable power to analog comp.
+
+		; Disable digital pin buffer
+		ldi tmp, 	(1 << ADC_Inp)
+		out DIDR0, 	tmp	
+		;***** END OF POWER SAVINGS *****
+
+#ifndef _TN9DEF_INC_
+		; Enable and configure ADC
+		ldi tmp, (1 << MUX1) | (0 << MUX0)	; PB2 as ADC input
+		out ADMUX, tmp
+		;rcall ADC_start ; run empty ADC read
+#endif
+
+		; Configure Pin Change interrupt for BUZZER input
+		ldi tmp, 	(1 << BUZZ_Inp)
+		out PCMSK, 	tmp	; configure pin for ext interrupt
+		sbi PCICR, PCIE0	; pin change interrupt enable
+						
 		sei ; Enable interrupts
 
+		out RSTFLR, z0	; reset all reset flags 
+
+		sbrc tmp1, EXTRF ; skip next command if reset occurs not by external reset
+		rjmp RST_PRESSED
+		; here we should clear SRAM variable, that counts reset presses...
+		sts RST_OPTION, z0
+		
+PRG_CONT:
+		
 ;******* MAIN LOOP *******	
 MAIN_loop:
 
@@ -209,6 +280,18 @@ GO_sleep:
 		SLEEP
 		; stops here until wake-up event occurs
 		ret
+
+WAIT100MS:  ; routine that creates delay 100ms at 4mhz
+		rcall WAIT50MS
+WAIT50MS:	; routine that creates delay 50ms at 4mhz
+		ldi  tmp, 255
+		ldi  tmp1, 139
+WT50_1: dec  tmp1
+		brne WT50_1
+		dec  tmp
+		brne WT50_1
+		ret
+
 		
 #ifndef _TN9DEF_INC_		
 ; Configures ADC, starts conversion, waits for result...
@@ -244,6 +327,8 @@ WaitAdc2:
 ; Beep the buzzer.
 ;variable buz_on_cntr determines, will routine beep until PCINT cbange interrupt (0 value), or short beep - max 84ms (255 value)
 BEEP:
+		cp mute_buzz, z0
+		brne PWM_exit		; no sound if flag mute_buzz is set
 		; enable timer0
 		in tmp, PRR
 		sbr tmp, PRTIM0
@@ -309,4 +394,5 @@ PWM_loop_exit:
 		cbr tmp, PRTIM0
 		out PRR, tmp
 ; ***** END OF MANUAL PWM ROUTINE ******
+PWM_exit:
 ret
