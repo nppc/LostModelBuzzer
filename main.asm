@@ -4,6 +4,10 @@
 
 .EQU	TMR_COMP_VAL = 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
 
+.undef XL
+.undef XH
+.undef YL
+.undef YH
 .undef ZL
 .undef ZH
 ; r0-r15 is not available in this tiny mcu series.
@@ -15,9 +19,9 @@
 .def	buz_on_cntr	= r21	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
 .def	adc_val		= r22	; Here we allways have fresh voltage reading value
 .def	itmp_sreg	= r23	; storage for SREG in interrupts
-.def	tcompL		= r24
-.def	tcompH		= r25
-.def	onewire_d	= r26	; data from ICP routine (len of the signal)
+.def	W1_DATA_L	= r24	; L data register for data, received by 1Wire protocol
+.def	W1_DATA_H	= r25	; H data register for data, received by 1Wire protocol
+.def	icp_d		= r26	; delay from ICP routine (len of the signal)
 ;.def	itmp		= r24	; interrupts temp register
 ;.def	itmp1		= r25	; interrupts temp register
 .def	mute_buzz	= r30	; flag indicates that we need to mute buzzer (after reset manually pressed).
@@ -27,6 +31,9 @@
 .DSEG
 .ORG 0x0040	; start of SRAM data memory
 RST_OPTION: 	.BYTE 1	; store here count of reset presses after power-on to determine special modes of operation
+COMP_VAL_RAM_L:	.BYTE 1	; storage for freq value of buzzer. Can be changed in configuration mode.
+COMP_VAL_RAM_H:	.BYTE 1 ; storage for freq value of buzzer. Can be changed in configuration mode.
+VOLUME_RAM:		.BYTE 1 ; storage for volume value (1-20)
 
 .CSEG
 		rjmp RESET 	; Reset Handler
@@ -42,8 +49,8 @@ RST_OPTION: 	.BYTE 1	; store here count of reset presses after power-on to deter
 		reti		;rjmp ADC_int; ADC Conversion Handler
 
 ;TCAP_int:	; SREG is not affected here
-;		in onewire_d, TCNT0L
-;		in onewire_d, TCNT0H	; we are interested in High byte only
+;		in icp_d, TCNT0L
+;		in icp_d, TCNT0H	; we are interested in High byte only
 ;		reti
 
 RST_PRESSED: ; we came here when reset button is pressed
@@ -94,39 +101,67 @@ L1_RST_WAIT:
 		; TODO 1wire protocol
 		; configure timer0 for capturing 1w data
 		; TCCR0A, TCCR0B and TCCR0C is already configured
-		ldi tmp, (1 << TOIE0); enable Overflow interrupt 
+W1_L0:	ldi tmp, (1 << TOIE0); enable Overflow interrupt 
 		out TIMSK0, tmp
 		ldi tmp, (1 <<ICF0); clear ICF flag
 		out TIFR0, tmp
 		clt		; clear T flag 
-		; enable timer0
-		in tmp, PRR
-		sbr tmp, PRTIM0
-		out PRR, tmp
+		rcall TIMER_ENABLE	; enable timer0 and reset timer counter
 		; Now wait for data (first need to catch timer overflow, indicating that all transfers are finished)
 W1_L1:	; Oveflow will be indicated by T flag is set
 		brtc W1_L1		; loop here until overflow will come
 		clt				; reset overflow flag
+		clr W1_DATA_L	; prepare register for receiving 16 bit of data
+		clr W1_DATA_H	; prepare register for receiving 16 bit of data
+		ldi tmp1, 16	; counter for receiving bits
 		; now wait for the first ICP, it will be the beginning of the first bit.		
-W1_L2:	brts W1_L1		; start over, overflow is came
+W1_L2:	brts W1_L0		; start over, desync or no data came
 		in tmp, TIFR0
 		sbrs tmp, ICF0
 		rjmp W1_L2		; loop
 		; read ICP register
-		in onewire_d, ICR0L
-		in onewire_d, ICR0H	; we are interested in High byte only
+		in icp_d, ICR0L
+		in icp_d, ICR0H	; we are interested in High byte only
 		ldi tmp, (1 <<ICF0)	; clear ICF flag
 		out TIFR0, tmp		; clear ICF flag
+		; clear timer0 to get new timing... need to check, maybe it is does automatically
 		out TCNT0H, z0
 		out TCNT0L, z0
 		; timing to check
-		;4ms = 64
-		;6ms = 96
-		;9ms = 144
-		;11ms = 176
-		
-		
-		rjmp PRG_CONT	; back to main program
+		;low bit - 4ms = 64, 6ms = 96
+		;high bit - 9ms = 144, 11ms = 176
+		cpi icp_d, 64
+		brlo W1_L0		; desync or corrupted data - start over
+		cpi icp_d, 176
+		brsh W1_L0		; desync or corrupted data - start over
+		cpi icp_d, 96
+		brlo W1_LOW		; low bit received
+		cpi icp_d, 144
+		brlo W1_L0		; desync or corrupted data - start over
+		; high bit received
+		sec				; set C flag
+		rjmp W1_CONT
+W1_LOW:	clc				; clear C flag
+W1_CONT:rol W1_DATA_L	; shift left one bit with C
+		rol W1_DATA_H	; shift left one bit with C
+		dec tmp1		; go tro next bit
+		brne W1_L2		; loop until all data received
+		; all data received
+		; if high byte is 0, then volume value came, otherwise it is frequency value
+		cp W1_DATA_H, z0
+		breq W1_ADJ_VOL
+		; adjust frequency variable
+		STS COMP_VAL_RAM_L, W1_DATA_L
+		STS COMP_VAL_RAM_H, W1_DATA_H
+		rjmp W1_END
+W1_ADJ_VOL:		; Buzzer volume
+		STS VOLUME_RAM, W1_DATA_L
+W1_END:	; we come here after 16 bits received and proccessed
+		rcall TIMER_DISABLE
+		; make sample beep
+		ldi buz_on_cntr, 255 ; load 255 to the buzzer counter (about 84ms)
+		rcall BEEP
+		rjmp W1_L0		; back to listen for 1Wire protocol
 RST_BUZZ_OFF:
 		ldi mute_buzz, 1
 		rjmp PRG_CONT	; back to main program
@@ -151,12 +186,16 @@ RESET:
 		; initialize variables
 		clr z0				; general 0 value register
 		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
-		ldi pwm_volume, 20	; 1-20 value for volume PWM (high freq PWM)
 		clr	buz_on_cntr		; default is beep until PCINT interrupt
 		clr mute_buzz		; by default buzzer is ON
 		; default Buzzer frequency
-		ldi tcompL, low(TMR_COMP_VAL)
-		ldi	tcompH, high(TMR_COMP_VAL)
+		ldi tmp, low(TMR_COMP_VAL)
+		STS COMP_VAL_RAM_L, tmp
+		ldi tmp, high(TMR_COMP_VAL)
+		STS COMP_VAL_RAM_H, tmp
+		; default Buzzer volume
+		ldi tmp, 20			; 1-20
+		STS VOLUME_RAM, tmp
 
 		; configure pins
 		ldi tmp, 	(1 << BUZZ_Out)	; set pin as output
@@ -169,12 +208,7 @@ RESET:
 		out TCCR0A, z0
 		ldi tmp, (1 << ICNC0) | (0 << ICES0) | (1 << WGM02) | (1 << CS00) ; also preconfigure ICP mode
 		out TCCR0B, tmp
-		ldi tmp, (1 << OCIE0A) ; enable compare interrupt and set in the interrupt routine T flag
-		out TIMSK0, tmp
-		; disable timer0 for now
-		in tmp, PRR
-		cbr tmp, PRTIM0
-		out PRR, tmp
+		rcall TIMER_DISABLE ; disable timer0 for now
 
 				;***** POWER SAVINGS *****
 		; disable analog comparator
@@ -212,11 +246,11 @@ PRG_CONT:
 ;******* MAIN LOOP *******	
 MAIN_loop:
 
-		ldi buz_on_cntr, 255 ; load 255 to the buzzer counter (about 84ms)
+		ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
 		rcall WDT_On_250ms
 		rcall GO_sleep ; stops here until wake-up event occurs
-		ldi buz_on_cntr, 255 ; load 255 to the buzzer counter (about 84ms)
+		ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
 		rcall WDT_On_1s
 		rcall GO_sleep ; stops here until wake-up event occurs
@@ -240,8 +274,6 @@ WDT_int:
 		;cp pwm_volume, pwm_dutyfst	; compare to max value for volume allowed (1-19)
 		;brlo WDTiext ; exit if no counter reset needed
 		;ldi pwm_volume, 1	; reset volume counter
-		;subi tcompL, 2
-		;sbc tcompH, z0
 WDTiext:
 		out SREG, itmp_sreg
 		reti
@@ -329,19 +361,24 @@ WaitAdc2:
 BEEP:
 		cp mute_buzz, z0
 		brne PWM_exit		; no sound if flag mute_buzz is set
+		; set volume
+		lds pwm_volume, VOLUME_RAM ; 1-20 value for volume PWM (high freq PWM)
+		;ldi pwm_volume, 20	; 1-20 value for volume PWM (high freq PWM)
 		; enable timer0
-		in tmp, PRR
-		sbr tmp, PRTIM0
-		out PRR, tmp
+		ldi tmp, (1 << OCIE0A) ; enable compare interrupt 
+		out TIMSK0, tmp
 		; load Compare register to get 3khz
 		; Set OCR0A to 645 - about 3khz at 4mhz clock (50% duty cycle)
+		lds tmp1, COMP_VAL_RAM_H
+		lds tmp, COMP_VAL_RAM_L
 		cli
-		out OCR0AH,tcompH
-		out OCR0AL,tcompL
+		out OCR0AH,tmp1
+		out OCR0AL,tmp
 		sei
-		out TCNT0H, z0	; reset timer just in case...
-		out TCNT0L, z0
+		;out TCNT0H, z0	; reset timer just in case...
+		;out TCNT0L, z0
 		clt		; clear T flag
+		rcall TIMER_ENABLE	; reset timer counter
 
 		; pwm_counter is a counter here
 PWM_loop:
@@ -390,9 +427,25 @@ chck_pcint:
 ; here we finish our handmade PWM routine for buzzer.
 PWM_loop_exit:
 		; disable the timer
-		in tmp, PRR
-		cbr tmp, PRTIM0
-		out PRR, tmp
+		rcall TIMER_DISABLE
 ; ***** END OF MANUAL PWM ROUTINE ******
 PWM_exit:
 ret
+
+TIMER_ENABLE:
+		; disable the timer
+		in tmp, PRR
+		sbr tmp, PRTIM0
+		out PRR, tmp
+		; reset timer
+		out TCNT0H, z0
+		out TCNT0L, z0
+		ret
+
+TIMER_DISABLE:
+		; disable the timer
+		in tmp, PRR
+		cbr tmp, PRTIM0
+		out PRR, tmp
+		ret
+		
