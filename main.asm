@@ -3,6 +3,7 @@
 .EQU	ADC_Inp		= PB2	; is an analog input for voltage sensing
 
 .EQU	TMR_COMP_VAL = 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
+.EQU    ADC_LOW_VAL  = 200      ; adc value lower is Beacon mode
 
 .undef XL
 .undef XH
@@ -38,7 +39,7 @@ VOLUME_RAM:		.BYTE 1 ; storage for volume value (1-20)
 .CSEG
 		rjmp RESET 	; Reset Handler
 		reti		;rjmp INT0 	; IRQ0 Handler
-		rjmp PC_int	; PCINT0 Handler
+		reti            ; just wake up... rjmp PC_int	; PCINT0 Handler
 		reti		;rjmp TCAP_int; Timer0 Capture Handler
 		set			; Timer0 Overflow Handler try T flag first
 		set			; Timer0 Compare A Handler (save time for rcall). exits by next reti command
@@ -246,26 +247,41 @@ PRG_CONT:
 ;******* MAIN LOOP *******	
 MAIN_loop:
 
+		#ifndef _TN9DEF_INC_
+		rcall ADC_start ; read ADC value to adc_val
+		#endif
+		cp adc_val, ADC_LOW_VAL
+		brlo GO_BEACON
+		
+		; check input pin for state
+		clr buz_on_cntr ; if pin on, we are ready
+		sbis PINB, BUZZ_Inp
+		rcall BEEP  ; beep until pin change come
+		rjmp MAIN_loop
+
+GO_BEACON:      ; right after power loss we wait a minute, and then beep
+		ldi tmp, 8 ; about 1 minute
+BEAC_WT1:	push tmp
+		rcall WDT_On_8s
+		rcall GO_sleep
+		pop tmp
+		dec tmp
+		brne BEAC_WT1
+		
 		ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
 		rcall WDT_On_250ms
 		rcall GO_sleep ; stops here until wake-up event occurs
 		ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
-		rcall WDT_On_1s
-		rcall GO_sleep ; stops here until wake-up event occurs
-		; After waking up we need to read ADC for 2 reasons.
-		; 1. We want to know the VCC voltage to adjust PWM to the BUZZER.
-		; 2. We need to determine VCC loss (FC powered off), to enable BEAKON mode.
-		#ifndef _TN9DEF_INC_
-		rcall ADC_start ; read ADC value to adc_val
-		#endif
+		rcall WDT_On_8s
+		rcall GO_sleep ; stops here until wake-up event occur
 		
 		rjmp MAIN_loop 
 ;******* END OF MAIN LOOP *******	
 
-PC_int:
-		reti
+;PC_int:
+;		reti
 		
 ; test routine for volume change
 WDT_int:
@@ -423,6 +439,10 @@ PWM_loop_cycle_end:	; we come here after every timer compare match interrupt
 ; currently do nothing here
 chck_pcint:		
 		; we also need to check voltage readings for voltage drop, if, for example, power will be disconnected while beep...
+		sbic PINB, BUZZ_Inp
+		rjmp PWM_loop_exit
+		cp adc_val, ADC_LOW_VAL
+		brlo PWM_loop_exit
 		rjmp PWM_loop
 ; here we finish our handmade PWM routine for buzzer.
 PWM_loop_exit:
