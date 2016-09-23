@@ -23,7 +23,7 @@
 .def	W1_DATA_L	= r24	; L data register for data, received by 1Wire protocol
 .def	W1_DATA_H	= r25	; H data register for data, received by 1Wire protocol
 .def	icp_d		= r26	; delay from ICP routine (len of the signal)
-;.def	itmp		= r24	; interrupts temp register
+.def	wdt_cntr	= r27.  ; counter for wdt interrupts
 ;.def	itmp1		= r25	; interrupts temp register
 .def	mute_buzz	= r30	; flag indicates that we need to mute buzzer (after reset manually pressed).
 .def	z0			= r31	; zero reg
@@ -186,6 +186,7 @@ RESET:
 
 		; initialize variables
 		clr z0				; general 0 value register
+		clr wdt_cntr
 		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
 		clr	buz_on_cntr		; default is beep until PCINT interrupt
 		clr mute_buzz		; by default buzzer is ON
@@ -241,7 +242,20 @@ RESET:
 		rjmp RST_PRESSED
 		; here we should clear SRAM variable, that counts reset presses...
 		sts RST_OPTION, z0
-		
+CHARGE_CAP:
+		; here is special startup mode
+		; to let supercap to charge above beakon voltage
+		#ifndef _TN9DEF_INC_
+		rcall ADC_start ; read ADC value to adc_val
+		#endif
+		cp adc_val, ADC_LOW_VAL
+		brsh MAIN_loop ; cap is charged
+		; check input pin for state
+		clr buz_on_cntr ; if pin on, we are ready
+		sbis PINB, BUZZ_Inp
+		rcall BEEP  ; beep until pin change come
+		rjmp CHARGE_CAP
+	
 PRG_CONT:
 		
 ;******* MAIN LOOP *******	
@@ -286,10 +300,7 @@ BEAC_WT1:	push tmp
 ; test routine for volume change
 WDT_int:
 		in itmp_sreg, SREG
-		;inc pwm_volume
-		;cp pwm_volume, pwm_dutyfst	; compare to max value for volume allowed (1-19)
-		;brlo WDTiext ; exit if no counter reset needed
-		;ldi pwm_volume, 1	; reset volume counter
+		inc wdt_cntr
 WDTiext:
 		out SREG, itmp_sreg
 		reti
