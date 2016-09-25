@@ -3,7 +3,7 @@
 .EQU	ADC_Inp		= PB2	; is an analog input for voltage sensing
 
 .EQU	TMR_COMP_VAL = 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
-.EQU    ADC_LOW_VAL  = 200      ; adc value lower is Beacon mode
+.EQU    ADC_LOW_VAL  = 190      ; adc value lower is Beacon mode
 
 .undef XL
 .undef XH
@@ -23,7 +23,7 @@
 .def	W1_DATA_L	= r24	; L data register for data, received by 1Wire protocol
 .def	W1_DATA_H	= r25	; H data register for data, received by 1Wire protocol
 .def	icp_d		= r26	; delay from ICP routine (len of the signal)
-.def	wdt_cntr	= r27.  ; counter for wdt interrupts
+;.def	wdt_cntr	= r27.  ; counter for wdt interrupts
 ;.def	itmp1		= r25	; interrupts temp register
 .def	mute_buzz	= r30	; flag indicates that we need to mute buzzer (after reset manually pressed).
 .def	z0			= r31	; zero reg
@@ -45,7 +45,7 @@ VOLUME_RAM:		.BYTE 1 ; storage for volume value (1-20)
 		set			; Timer0 Compare A Handler (save time for rcall). exits by next reti command
 		reti		; Timer0 Compare B Handler
 		reti		; Analog Comparator Handler
-		rjmp WDT_int; Watchdog Interrupt Handler
+		reti		;rjmp WDT_int; Watchdog Interrupt Handler
 		reti		; Voltage Level Monitor Handler
 		reti		;rjmp ADC_int; ADC Conversion Handler
 
@@ -186,7 +186,7 @@ RESET:
 
 		; initialize variables
 		clr z0				; general 0 value register
-		clr wdt_cntr
+		;clr wdt_cntr
 		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
 		clr	buz_on_cntr		; default is beep until PCINT interrupt
 		clr mute_buzz		; by default buzzer is ON
@@ -196,7 +196,7 @@ RESET:
 		ldi tmp, high(TMR_COMP_VAL)
 		STS COMP_VAL_RAM_H, tmp
 		; default Buzzer volume
-		ldi tmp, 20			; 1-20
+		ldi tmp, 19			; 1-20
 		STS VOLUME_RAM, tmp
 
 		; configure pins
@@ -204,7 +204,7 @@ RESET:
 		out DDRB,	tmp				; all other pins will be inputs		
 		ldi tmp, 	(1 << BUZZ_Inp)	; enable pull-up to protect floating input when no power on FC
 		out PUEB,	tmp				; 
-		out PORTB, z0				; all pins to LOW
+		out PORTB, tmp				; all pins to LOW except pull-up
 
 		; configure timer 0 to work in CTC mode (4), no prescaler
 		out TCCR0A, z0
@@ -242,14 +242,15 @@ RESET:
 		rjmp RST_PRESSED
 		; here we should clear SRAM variable, that counts reset presses...
 		sts RST_OPTION, z0
+
 CHARGE_CAP:
 		; here is special startup mode
 		; to let supercap to charge above beakon voltage
 		#ifndef _TN9DEF_INC_
 		rcall ADC_start ; read ADC value to adc_val
 		#endif
-		cp adc_val, ADC_LOW_VAL
-		brsh MAIN_loop ; cap is charged
+		cpi adc_val, ADC_LOW_VAL
+		brsh PRG_CONT ; cap is charged
 		; check input pin for state
 		clr buz_on_cntr ; if pin on, we are ready
 		sbis PINB, BUZZ_Inp
@@ -264,25 +265,36 @@ MAIN_loop:
 		#ifndef _TN9DEF_INC_
 		rcall ADC_start ; read ADC value to adc_val
 		#endif
-		cp adc_val, ADC_LOW_VAL
+		cpi adc_val, ADC_LOW_VAL - 30  ; go beakon when voltage divider is relly very low voltage (about 1 volt)
 		brlo GO_BEACON
 		
 		; check input pin for state
 		clr buz_on_cntr ; if pin on, we are ready
 		sbis PINB, BUZZ_Inp
 		rcall BEEP  ; beep until pin change come
+		; go sleep, it will speed up supercap charging a bit...
+		rcall WDT_On_8s
+		rcall GO_sleep
+		; we will wake up on pin change or wdt interrupt
 		rjmp MAIN_loop
 
 GO_BEACON:      ; right after power loss we wait a minute, and then beep
 		ldi tmp, 8 ; about 1 minute
-BEAC_WT1:	push tmp
+BEAC_WT1:	
+		; TODO-TEST exit here if battery connected back...
+		push tmp
 		rcall WDT_On_8s
 		rcall GO_sleep
+		#ifndef _TN9DEF_INC_
+		rcall ADC_start ; read ADC value to adc_val
+		#endif
 		pop tmp
+		cpi adc_val, ADC_LOW_VAL - 30  ; go beakon when voltage divider is relly very low voltage (about 1 volt)
+		brsh BEAC_EXIT
 		dec tmp
 		brne BEAC_WT1
 		
-		ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
+BEAC_L1:ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
 		rcall WDT_On_250ms
 		rcall GO_sleep ; stops here until wake-up event occurs
@@ -290,26 +302,17 @@ BEAC_WT1:	push tmp
 		rcall BEEP
 		rcall WDT_On_8s
 		rcall GO_sleep ; stops here until wake-up event occur
-		
-		rjmp MAIN_loop 
+		; TODO: Exit from Beacon if battery connected...
+		cpi adc_val, ADC_LOW_VAL - 30 ; stay in beakon when voltage divider is relly very low voltage (about 1 volt)
+		brlo BEAC_L1
+		; go back to main loop - battery connected
+		; turn mute off (in case buzzer was muted)
+BEAC_EXIT:
+		clr mute_buzz
+		sts RST_OPTION, z0
+		rjmp CHARGE_CAP 
 ;******* END OF MAIN LOOP *******	
 
-;PC_int:
-;		reti
-		
-; test routine for volume change
-WDT_int:
-		in itmp_sreg, SREG
-		inc wdt_cntr
-WDTiext:
-		out SREG, itmp_sreg
-		reti
-
-; sets T flag on timer compare match interrupt to speedup manual PWM routine
-; routine in the interrupts vector
-;TmrC_int:
-;		set	; set T flag. No other flags in SREG is affected
-;		reti		
 	
 
 WDT_On_250ms:
@@ -358,7 +361,7 @@ WT50_1: dec  tmp1
 ADC_start:
 		; enable ADC
 		in tmp, PRR
-		cbr tmp, PRADC
+		cbr tmp, (1 << PRADC) ; clear bit to enable ADC
 		out PRR, tmp
 		ldi tmp, (1 << ADEN) | (1 << ADSC) | (0 << ADATE) | (1 << ADIF) | (0 <<  ADIE) | (0 <<  ADPS2) | (1 <<  ADPS1) | (1 <<  ADPS0) ; prescaler 8, auto disabled
 		out ADCSRA, tmp
@@ -378,7 +381,8 @@ WaitAdc2:
 		in adc_val, ADCL
 		; switch AD converter off
 		out ADCSRA, z0
-		ldi tmp, (1 << PRADC)
+		in tmp, PRR
+		sbr tmp, (1 << PRADC) ; set bit to disable ADC
 		out PRR, tmp
 		ret
 #endif
@@ -392,6 +396,7 @@ BEEP:
 		lds pwm_volume, VOLUME_RAM ; 1-20 value for volume PWM (high freq PWM)
 		;ldi pwm_volume, 20	; 1-20 value for volume PWM (high freq PWM)
 		; enable timer0
+		rcall TIMER_ENABLE	; reset timer counter
 		ldi tmp, (1 << OCIE0A) ; enable compare interrupt 
 		out TIMSK0, tmp
 		; load Compare register to get 3khz
@@ -405,7 +410,6 @@ BEEP:
 		;out TCNT0H, z0	; reset timer just in case...
 		;out TCNT0L, z0
 		clt		; clear T flag
-		rcall TIMER_ENABLE	; reset timer counter
 
 		; pwm_counter is a counter here
 PWM_loop:
@@ -441,7 +445,7 @@ PWM_lw1:
 ; 3khz 50% duty cycle transition		
 PWM_loop_cycle_end:	; we come here after every timer compare match interrupt	
 		clt				; clear T flag ("Compare Match" flag clear)
-		cp buz_on_cntr, z0
+		cpi buz_on_cntr, 0
 		breq chck_pcint		; go to routine to check, does PC_int (pin change interrupt) occurs?
 		dec buz_on_cntr
 		breq PWM_loop_exit	; Stop Buzzer beep
@@ -450,10 +454,10 @@ PWM_loop_cycle_end:	; we come here after every timer compare match interrupt
 ; currently do nothing here
 chck_pcint:		
 		; we also need to check voltage readings for voltage drop, if, for example, power will be disconnected while beep...
-		sbic PINB, BUZZ_Inp
+		sbic PINB, BUZZ_Inp ; stay in loop if pin is low
 		rjmp PWM_loop_exit
-		cp adc_val, ADC_LOW_VAL
-		brlo PWM_loop_exit
+		cpi adc_val, ADC_LOW_VAL - 30
+		brlo PWM_loop_exit		; go out if beacon mode activated
 		rjmp PWM_loop
 ; here we finish our handmade PWM routine for buzzer.
 PWM_loop_exit:
@@ -464,9 +468,9 @@ PWM_exit:
 ret
 
 TIMER_ENABLE:
-		; disable the timer
+		; enable the timer
 		in tmp, PRR
-		sbr tmp, PRTIM0
+		cbr tmp, (1 << PRTIM0) ; clear bit
 		out PRR, tmp
 		; reset timer
 		out TCNT0H, z0
@@ -476,7 +480,7 @@ TIMER_ENABLE:
 TIMER_DISABLE:
 		; disable the timer
 		in tmp, PRR
-		cbr tmp, PRTIM0
+		sbr tmp, (1 << PRTIM0) ; set bit
 		out PRR, tmp
 		ret
 		
