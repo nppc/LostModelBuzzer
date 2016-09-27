@@ -83,8 +83,13 @@ RST_PRESSED: ; we come here when reset button is pressed
 		; 2. configure LostModelBuzzer. with some 1wire simple protocol change parameters. (Actually just test them, then reflash, because of no EEPROM for config).
 		;    configurable: Buzzer freq, delay for start beakon after power loss, loudness of the buzzer (fixed or adjustad by voltage).
 		rcall WAIT100MS
+		; if we are not powered from battery, do only buzzer mute 
+		rcall ADC_start ; read ADC value to adc_val
+		cpi adc_val, ADC_LOW_VAL  	; if battery is not connected
+		brsh L1_RST
+		sts RST_OPTION, z0			; clear RESET counter to stay in first option 
 		; increment counter
-		lds tmp, RST_OPTION
+L1_RST:	lds tmp, RST_OPTION
 		inc tmp
 		; loop if pressed too much times
 		cpi tmp, 3			; 3 is non existing mode
@@ -96,7 +101,7 @@ SKP_OPT_LOOP:
 L1_BUZ_RST:
 		push tmp
 		ldi buz_on_cntr, 100 ; load 100 to the buzzer counter (about 30ms)
-		rcall BEEP
+		rcall BEEP_ON		; ignore mute flag
 		rcall WAIT100MS
 		pop tmp
 		dec tmp
@@ -116,6 +121,8 @@ L1_RST_WAIT:
 		cpi tmp, 1
 		breq RST_BUZZ_OFF
 		; if no buzz off then go to 1 wire transfer mode
+		; also go to 1 wire mode, if we are powered from battery
+		
 		; TODO 1wire protocol
 		; configure timer0 for capturing 1w data
 		; TCCR0A, TCCR0B and TCCR0C is already configured
@@ -178,7 +185,7 @@ W1_END:	; we come here after 16 bits received and proccessed
 		rcall TIMER_DISABLE
 		; make sample beep
 		ldi buz_on_cntr, 255 ; load 255 to the buzzer counter (about 84ms)
-		rcall BEEP
+		rcall BEEP_ON	; skip mute check
 		rjmp W1_L0		; back to listen for 1Wire protocol
 RST_BUZZ_OFF:
 		ldi mute_buzz, 1
@@ -186,6 +193,7 @@ RST_BUZZ_OFF:
 
 ; start of the program
 RESET: 	
+		cli
 		; determine why we are here (by power-on or by reset pin goes to low)
 		in tmp1, RSTFLR	; tmp1 should not be changed til sbrc tmp1, EXTRF
 		
@@ -204,7 +212,7 @@ RESET:
 		; initialize variables
 		clr z0				; general 0 value register
 		;clr wdt_cntr
-		clr	buz_on_cntr		; default is beep until PCINT interrupt
+		;clr	buz_on_cntr		; default is beep until PCINT interrupt
 		clr mute_buzz		; by default buzzer is ON
 		; default Buzzer frequency
 		ldi tmp, low(TMR_COMP_VAL)
@@ -254,8 +262,6 @@ RESET:
 
 		sbrc tmp1, EXTRF ; skip next command if reset occurs not by external reset
 		rjmp RST_PRESSED
-		; here we should clear SRAM variable, that counts reset presses...
-		sts RST_OPTION, z0
 
 CHARGE_CAP:
 		; here is special startup mode
@@ -263,8 +269,8 @@ CHARGE_CAP:
 		rcall ADC_start ; read ADC value to adc_val
 		cpi adc_val, ADC_LOW_VAL
 		brsh PRG_CONT ; cap is charged
-		; check input pin for state
 		clr buz_on_cntr ; if pin on, we are ready
+		; check input pin for state
 		sbis PINB, BUZZ_Inp
 		rcall BEEP  ; beep until pin change come
 		rjmp CHARGE_CAP
@@ -273,6 +279,8 @@ PRG_CONT:
 		
 ;******* MAIN LOOP *******	
 MAIN_loop:
+		; here we should clear SRAM variable, that counts reset presses...
+		sts RST_OPTION, z0
 
 		rcall ADC_start ; read ADC value to adc_val
 		cpi adc_val, ADC_BEACON_VAL  ; go beakon when voltage divider is relly very low voltage (less than 1 volt)
@@ -316,8 +324,8 @@ BEAC_L1:ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		; go back to main loop - battery connected
 		; turn mute off (in case buzzer was muted)
 BEAC_EXIT:
-		clr mute_buzz
-		sts RST_OPTION, z0
+		clr mute_buzz	; buzzer should not be muted after going back to normal mode
+		;sts RST_OPTION, z0
 		rjmp CHARGE_CAP 
 ;******* END OF MAIN LOOP *******	
 
@@ -398,6 +406,7 @@ BEEP:
 		cp mute_buzz, z0
 		brne PWM_exit		; no sound if flag mute_buzz is set
 		; set volume
+BEEP_ON:	; call from here if we want to skip beep mute check... 
 		lds pwm_volume, VOLUME_RAM ; 1-20 value for volume PWM (high freq PWM)
 		;ldi pwm_volume, 20	; 1-20 value for volume PWM (high freq PWM)
 		; enable timer0
