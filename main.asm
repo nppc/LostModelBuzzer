@@ -21,9 +21,11 @@
 .EQU	BUZZ_Inp	= PB1	; BUZZER Input from FC 
 .EQU	ADC_Inp		= PB2	; is an analog input for voltage sensing
 
-.EQU	TMR_COMP_VAL = 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
-.EQU    ADC_LOW_VAL  = 190      ; adc value lower is Beacon mode
-.EQU	DEFAULT_VOUME	= 20	; Buzzer volume (1-20)
+.EQU	TMR_COMP_VAL 	= 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
+.EQU    ADC_LOW_VAL  	= 190      	; adc value lower is Beacon mode
+.EQU    ADC_BEACON_VAL  = 150		; below this ADC value we should switch to Beacon mode (less than 1 volt)
+.EQU	PWM_FAST_DUTY	= 20		; Fast PWM (Volume) duty cycle len
+.EQU	DEFAULT_VOUME	= 20		; Buzzer volume (1-20)
 
 .undef XL
 .undef XH
@@ -35,7 +37,7 @@
 .def	tmp			= r16 	; general temp register
 .def	tmp1		= r17 	; general temp register
 .def	pwm_volume	= r18	; range: 1-20. Variable that sets the volume of buzzer (interval when BUZZ_Out in fast PWM is HIGH)
-.def	pwm_dutyfst	= r19	; const value 20. Duty cycle len for fast PWM
+;.def	pwm_dutyfst	= r19	; const value 20. Duty cycle len for fast PWM
 .def	pwm_counter	= r20	; just a counter for fast PWM duty cycle
 .def	buz_on_cntr	= r21	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
 .def	adc_val		= r22	; Here we allways have fresh voltage reading value
@@ -202,7 +204,6 @@ RESET:
 		; initialize variables
 		clr z0				; general 0 value register
 		;clr wdt_cntr
-		ldi pwm_dutyfst, 20	; total len of duty cycle of fast PWM
 		clr	buz_on_cntr		; default is beep until PCINT interrupt
 		clr mute_buzz		; by default buzzer is ON
 		; default Buzzer frequency
@@ -237,12 +238,10 @@ RESET:
 		out DIDR0, 	tmp	
 		;***** END OF POWER SAVINGS *****
 
-#ifndef _TN9DEF_INC_
 		; Enable and configure ADC
 		ldi tmp, (1 << MUX1) | (0 << MUX0)	; PB2 as ADC input
 		out ADMUX, tmp
 		;rcall ADC_start ; run empty ADC read
-#endif
 
 		; Configure Pin Change interrupt for BUZZER input
 		ldi tmp, 	(1 << BUZZ_Inp)
@@ -261,9 +260,7 @@ RESET:
 CHARGE_CAP:
 		; here is special startup mode
 		; to let supercap to charge above beakon voltage
-		#ifndef _TN9DEF_INC_
 		rcall ADC_start ; read ADC value to adc_val
-		#endif
 		cpi adc_val, ADC_LOW_VAL
 		brsh PRG_CONT ; cap is charged
 		; check input pin for state
@@ -277,10 +274,8 @@ PRG_CONT:
 ;******* MAIN LOOP *******	
 MAIN_loop:
 
-		#ifndef _TN9DEF_INC_
 		rcall ADC_start ; read ADC value to adc_val
-		#endif
-		cpi adc_val, ADC_LOW_VAL - 30  ; go beakon when voltage divider is relly very low voltage (about 1 volt)
+		cpi adc_val, ADC_BEACON_VAL  ; go beakon when voltage divider is relly very low voltage (less than 1 volt)
 		brlo GO_BEACON
 		
 		; check input pin for state
@@ -300,28 +295,23 @@ BEAC_WT1:
 		push tmp
 		rcall WDT_On_8s
 		rcall GO_sleep
-		#ifndef _TN9DEF_INC_
 		rcall ADC_start ; read ADC value to adc_val
-		#endif
 		pop tmp
-		cpi adc_val, ADC_LOW_VAL - 30  ; go beakon when voltage divider is relly very low voltage (about 1 volt)
+		cpi adc_val, ADC_LOW_VAL  ; go out of the Beacon mode if power restored
 		brsh BEAC_EXIT
 		dec tmp
 		brne BEAC_WT1
 		
 BEAC_L1:ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
-		rcall WDT_On_250ms
+		rcall WDT_On_250ms	; make small pause...
 		rcall GO_sleep ; stops here until wake-up event occurs
 		ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
 		rcall WDT_On_8s
 		rcall GO_sleep ; stops here until wake-up event occur
-		; TODO: TEST Exit from Beacon if battery connected...
-		#ifndef _TN9DEF_INC_
 		rcall ADC_start ; read ADC value to adc_val
-		#endif
-		cpi adc_val, ADC_LOW_VAL - 30 ; stay in beakon when voltage divider is relly very low voltage (about 1 volt)
+		cpi adc_val, ADC_BEACON_VAL ; stay in beakon when voltage divider is relly very low voltage (about 1 volt)
 		brlo BEAC_L1
 		; go back to main loop - battery connected
 		; turn mute off (in case buzzer was muted)
@@ -372,8 +362,6 @@ WT50_1: dec  tmp1
 		brne WT50_1
 		ret
 
-		
-#ifndef _TN9DEF_INC_		
 ; Configures ADC, starts conversion, waits for result...
 ; returns result in adc_val		
 ADC_start:
@@ -403,7 +391,6 @@ WaitAdc2:
 		sbr tmp, (1 << PRADC) ; set bit to disable ADC
 		out PRR, tmp
 		ret
-#endif
 		
 ; Beep the buzzer.
 ;variable buz_on_cntr determines, will routine beep until PCINT cbange interrupt (0 value), or short beep - max 84ms (255 value)
@@ -440,7 +427,7 @@ PWM_loop_fast: ; 4 cpu cycles per loop
 		dec pwm_counter					;1 count value for pin ON for Buzzer volume regulation
 		brne PWM_loop_fast				;2
 		
-		mov pwm_counter, pwm_dutyfst	;1 initialize couner for remaining cycle
+		ldi pwm_counter, PWM_FAST_DUTY	;1 initialize couner for remaining cycle
 		sub pwm_counter, pwm_volume		;1 adjust counter to correct value
 		breq PWM_loop					;1(2) if volume at max (pwm_dutyfst=pwm_volume) then do not turn buzzer pin low.
 		cbi PORTB, BUZZ_Out 			;1 turn buzzer OFF
