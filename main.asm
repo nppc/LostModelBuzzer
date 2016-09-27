@@ -1,9 +1,29 @@
+/*
+ * Author: nppc
+ * Hardware design: nppc
+ * Contributor to the hardware design: universam
+ * 
+ * This file is the main routine for the Lost Alarm Buzzer module
+ *
+ * Lost Alarm Buzzer is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Lost Alarm Buzzer software is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ */
+ 
 .EQU	BUZZ_Out	= PB0	; PWM buzzer output 
 .EQU	BUZZ_Inp	= PB1	; BUZZER Input from FC 
 .EQU	ADC_Inp		= PB2	; is an analog input for voltage sensing
 
 .EQU	TMR_COMP_VAL = 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
 .EQU    ADC_LOW_VAL  = 190      ; adc value lower is Beacon mode
+.EQU	DEFAULT_VOUME	= 20	; Buzzer volume (1-20)
 
 .undef XL
 .undef XH
@@ -49,12 +69,7 @@ VOLUME_RAM:		.BYTE 1 ; storage for volume value (1-20)
 		reti		; Voltage Level Monitor Handler
 		reti		;rjmp ADC_int; ADC Conversion Handler
 
-;TCAP_int:	; SREG is not affected here
-;		in icp_d, TCNT0L
-;		in icp_d, TCNT0H	; we are interested in High byte only
-;		reti
-
-RST_PRESSED: ; we came here when reset button is pressed
+RST_PRESSED: ; we come here when reset button is pressed
 		; logic will be:
 		; very first action - is just wait for 100ms for example, to eliminate noise on reset button
 		; beep shortly n times
@@ -196,7 +211,7 @@ RESET:
 		ldi tmp, high(TMR_COMP_VAL)
 		STS COMP_VAL_RAM_H, tmp
 		; default Buzzer volume
-		ldi tmp, 19			; 1-20
+		ldi tmp, DEFAULT_VOUME		; 1-20
 		STS VOLUME_RAM, tmp
 
 		; configure pins
@@ -302,7 +317,10 @@ BEAC_L1:ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
 		rcall WDT_On_8s
 		rcall GO_sleep ; stops here until wake-up event occur
-		; TODO: Exit from Beacon if battery connected...
+		; TODO: TEST Exit from Beacon if battery connected...
+		#ifndef _TN9DEF_INC_
+		rcall ADC_start ; read ADC value to adc_val
+		#endif
 		cpi adc_val, ADC_LOW_VAL - 30 ; stay in beakon when voltage divider is relly very low voltage (about 1 volt)
 		brlo BEAC_L1
 		; go back to main loop - battery connected
@@ -451,12 +469,11 @@ PWM_loop_cycle_end:	; we come here after every timer compare match interrupt
 		breq PWM_loop_exit	; Stop Buzzer beep
 		rjmp PWM_loop
 
-; currently do nothing here
 chck_pcint:		
 		; we also need to check voltage readings for voltage drop, if, for example, power will be disconnected while beep...
 		sbic PINB, BUZZ_Inp ; stay in loop if pin is low
 		rjmp PWM_loop_exit
-		cpi adc_val, ADC_LOW_VAL - 30
+		cpi adc_val, ADC_LOW_VAL - 30	; we can directly check adc_val, because it is updated in the PWM generation code
 		brlo PWM_loop_exit		; go out if beacon mode activated
 		rjmp PWM_loop
 ; here we finish our handmade PWM routine for buzzer.
