@@ -25,7 +25,7 @@
 .EQU    ADC_LOW_VAL  	= 190      	; adc value lower is Beacon mode
 .EQU    ADC_BEACON_VAL  = 150		; below this ADC value we should switch to Beacon mode (less than 1 volt)
 .EQU	PWM_FAST_DUTY	= 20		; Fast PWM (Volume) duty cycle len
-.EQU	DEFAULT_VOUME	= 20		; Buzzer volume (1-20)
+.EQU	DEFAULT_VOUME	= 19		; Buzzer volume (1-20)
 
 .undef XL
 .undef XH
@@ -297,6 +297,9 @@ MAIN_loop:
 		rjmp MAIN_loop
 
 GO_BEACON:      ; right after power loss we wait a minute, and then beep
+		ldi buz_on_cntr, 20 ; load 255 to the buzzer counter (about 84ms)
+		rcall BEEP_ON
+		
 		ldi tmp, 8 ; about 1 minute
 BEAC_WT1:	
 		; TODO-TEST exit here if battery connected back...
@@ -407,8 +410,8 @@ BEEP:
 		brne PWM_exit		; no sound if flag mute_buzz is set
 		; set volume
 BEEP_ON:	; call from here if we want to skip beep mute check... 
-		lds pwm_volume, VOLUME_RAM ; 1-20 value for volume PWM (high freq PWM)
-		;ldi pwm_volume, 20	; 1-20 value for volume PWM (high freq PWM)
+		;lds pwm_volume, VOLUME_RAM ; 1-20 value for volume PWM (high freq PWM)
+		ldi pwm_volume, DEFAULT_VOUME	; 1-20 value for volume PWM (high freq PWM)
 		; enable timer0
 		rcall TIMER_ENABLE	; reset timer counter
 		ldi tmp, (1 << OCIE0A) ; enable compare interrupt 
