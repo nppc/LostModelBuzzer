@@ -1,3 +1,5 @@
+#define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
+
 /*
  * Author: nppc
  * Hardware design: nppc
@@ -16,6 +18,22 @@
  * GNU General Public License for more details.
  *
  */
+ 
+#ifdef INVERTED_INPUT
+ .MACRO SKIP_IF_INPUT_OFF
+	sbis PINB, BUZZ_Inp
+ .ENDMACRO
+ .MACRO SKIP_IF_INPUT_ON
+	sbic PINB, BUZZ_Inp
+.ENDMACRO
+#else
+ .MACRO SKIP_IF_INPUT_OFF
+	sbic PINB, BUZZ_Inp
+ .ENDMACRO
+ .MACRO SKIP_IF_INPUT_ON
+	sbis PINB, BUZZ_Inp
+.ENDMACRO
+#endif
  
 .EQU	BUZZ_Out	= PB0	; PWM buzzer output 
 .EQU	BUZZ_Inp	= PB1	; BUZZER Input from FC 
@@ -226,17 +244,23 @@ RESET:
 		; configure pins
 		ldi tmp, 	(1 << BUZZ_Out)	; set pin as output
 		out DDRB,	tmp				; all other pins will be inputs		
+		; If input is not inverted we need external pull-down resistor about 50K
+		#ifdef INVERTED_INPUT
 		ldi tmp, 	(1 << BUZZ_Inp)	; enable pull-up to protect floating input when no power on FC
 		out PUEB,	tmp				; 
 		out PORTB, tmp				; all pins to LOW except pull-up
+		#endif
+		out PRR, z0					; enable clock to the ADC and Timer0 to able to change their registers
 
-		; configure timer 0 to work in CTC mode (4), no prescaler
 		out TCCR0A, z0
-		ldi tmp, (1 << ICNC0) | (0 << ICES0) | (1 << WGM02) | (1 << CS00) ; also preconfigure ICP mode
-		out TCCR0B, tmp
 		rcall TIMER_DISABLE ; disable timer0 for now
 
-				;***** POWER SAVINGS *****
+		; Enable and configure ADC
+		ldi tmp, (1 << MUX1) | (0 << MUX0)	; PB2 as ADC input
+		out ADMUX, tmp
+		rcall ADC_DISABLE	; stop ADC for now
+
+		;***** POWER SAVINGS *****
 		; disable analog comparator
 		ldi	tmp, (1 << ACD)	; analog comp. disable
 		out ACSR, tmp			; disable power to analog comp.
@@ -245,11 +269,6 @@ RESET:
 		ldi tmp, 	(1 << ADC_Inp)
 		out DIDR0, 	tmp	
 		;***** END OF POWER SAVINGS *****
-
-		; Enable and configure ADC
-		ldi tmp, (1 << MUX1) | (0 << MUX0)	; PB2 as ADC input
-		out ADMUX, tmp
-		;rcall ADC_start ; run empty ADC read
 
 		; Configure Pin Change interrupt for BUZZER input
 		ldi tmp, 	(1 << BUZZ_Inp)
@@ -271,7 +290,8 @@ CHARGE_CAP:
 		brsh PRG_CONT ; cap is charged
 		clr buz_on_cntr ; if pin on, we are ready
 		; check input pin for state
-		sbis PINB, BUZZ_Inp
+		;sbis PINB, BUZZ_Inp
+		SKIP_IF_INPUT_OFF	; macro for sbis or sbic command
 		rcall BEEP  ; beep until pin change come
 		rjmp CHARGE_CAP
 	
@@ -288,7 +308,8 @@ MAIN_loop:
 		
 		; check input pin for state
 		clr buz_on_cntr ; if pin on, we are ready
-		sbis PINB, BUZZ_Inp
+		;sbis PINB, BUZZ_Inp
+		SKIP_IF_INPUT_OFF	; macro for sbis or sbic command
 		rcall BEEP  ; beep until pin change come
 		; go sleep, it will speed up supercap charging a bit...
 		rcall WDT_On_8s
@@ -397,6 +418,7 @@ WaitAdc2:
 		; read AD conversion result
 		in adc_val, ADCL
 		; switch AD converter off
+ADC_DISABLE:
 		out ADCSRA, z0
 		in tmp, PRR
 		sbr tmp, (1 << PRADC) ; set bit to disable ADC
@@ -420,12 +442,10 @@ BEEP_ON:	; call from here if we want to skip beep mute check...
 		; Set OCR0A to 645 - about 3khz at 4mhz clock (50% duty cycle)
 		lds tmp1, COMP_VAL_RAM_H
 		lds tmp, COMP_VAL_RAM_L
-		cli
+;		cli	; no needed to disable interrupts, they only set T flag, but anyway we clear it 
 		out OCR0AH,tmp1
 		out OCR0AL,tmp
-		sei
-		;out TCNT0H, z0	; reset timer just in case...
-		;out TCNT0L, z0
+;		sei
 		clt		; clear T flag
 
 		; pwm_counter is a counter here
@@ -433,7 +453,7 @@ PWM_loop:
 		; lets toggle fast Buzzer pin while we in first half of 3khz duty cycle
 		; Fast PWM
 		sbi PORTB, BUZZ_Out 			;1 turn buzzer ON
-		mov pwm_counter, pwm_volume		; Initialize counter
+		mov pwm_counter, pwm_volume		;1 Initialize counter
 PWM_loop_fast: ; 4 cpu cycles per loop
 		brts PWM_low					;1(2) Jump out if T flag is set (Compare Match)
 		dec pwm_counter					;1 count value for pin ON for Buzzer volume regulation
@@ -453,9 +473,7 @@ PWM_low:	; now second part of 3khz duty cycle
 		cbi PORTB, BUZZ_Out	; PWM in low state
 		clt		; reset timer capture match flag
 		; here we can call ADC read routine once to update voltage readings...
-		#ifndef _TN9DEF_INC_
-		rcall ADC_start		; we have plenty of time here, so, lets read ADC...
-		#endif
+		rcall ADC_start		; we have plenty of time here, but not later, so, lets read ADC...
 PWM_lw1:
 		brts PWM_loop_cycle_end				;1(2) Jump out if T flag is set (Compare Match)
 		rjmp PWM_lw1 ; otherwise just wait here. 
@@ -470,9 +488,10 @@ PWM_loop_cycle_end:	; we come here after every timer compare match interrupt
 
 chck_pcint:		
 		; we also need to check voltage readings for voltage drop, if, for example, power will be disconnected while beep...
-		sbic PINB, BUZZ_Inp ; stay in loop if pin is low
+		;sbic PINB, BUZZ_Inp ; stay in loop if pin is low
+		SKIP_IF_INPUT_ON	; macro for sbis or sbic command
 		rjmp PWM_loop_exit
-		cpi adc_val, ADC_LOW_VAL - 30	; we can directly check adc_val, because it is updated in the PWM generation code
+		cpi adc_val, ADC_BEACON_VAL	; we can directly check adc_val, because it is updated in the PWM generation code
 		brlo PWM_loop_exit		; go out if beacon mode activated
 		rjmp PWM_loop
 ; here we finish our handmade PWM routine for buzzer.
@@ -488,6 +507,9 @@ TIMER_ENABLE:
 		in tmp, PRR
 		cbr tmp, (1 << PRTIM0) ; clear bit
 		out PRR, tmp
+		; configure timer 0 to work in CTC mode (4), no prescaler
+		ldi tmp, (1 << ICNC0) | (0 << ICES0) | (1 << WGM02) | (1 << CS00) ; also preconfigure ICP mode
+		out TCCR0B, tmp
 		; reset timer
 		out TCNT0H, z0
 		out TCNT0L, z0
@@ -495,6 +517,7 @@ TIMER_ENABLE:
 
 TIMER_DISABLE:
 		; disable the timer
+		out TCCR0B, z0	; stop timer before turning it off
 		in tmp, PRR
 		sbr tmp, (1 << PRTIM0) ; set bit
 		out PRR, tmp
