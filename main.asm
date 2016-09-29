@@ -92,7 +92,7 @@ RST_PRESSED: ; we come here when reset button is pressed
 		;    configurable: Buzzer freq, delay for start beakon after power loss, loudness of the buzzer (fixed or adjustad by voltage).
 		rcall WAIT100MS
 		; if we are not powered from battery, do only buzzer mute 
-		sbis PORTB, V_Inp	; if pin is low, then only buzzer mute can be enabled
+		sbis PINB, V_Inp	; if pin is low, then only buzzer mute can be enabled
 		sts RST_OPTION, z0			; clear RESET counter to stay in first option 
 		; increment counter
 		lds tmp, RST_OPTION
@@ -263,7 +263,7 @@ MAIN_loop:
 		; here we should clear SRAM variable, that counts reset presses...
 		sts RST_OPTION, z0
 
-		sbis PORTB, V_Inp	; if pin is low, then power is disconnected
+		sbis PINB, V_Inp	; if pin is low, then power is disconnected
 		rjmp GO_BEACON
 		
 		; check input pin for state
@@ -287,7 +287,7 @@ BEAC_WT1:
 		rcall WDT_On_8s
 		rcall GO_sleep
 		pop tmp
-		sbic PORTB, V_Inp	; if pin is high, then power is connected, go out from Beacon mode
+		sbic PINB, V_Inp	; if pin is high, then power is connected, go out from Beacon mode
 		rjmp BEAC_EXIT
 		dec tmp
 		brne BEAC_WT1
@@ -300,7 +300,7 @@ BEAC_L1:ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
 		rcall WDT_On_8s
 		rcall GO_sleep ; stops here until wake-up event occur
-		sbis PORTB, V_Inp	; if pin is low, then power is connected, stay in Beacon mode
+		sbis PINB, V_Inp	; if pin is low, then power is connected, stay in Beacon mode
 		rjmp BEAC_L1
 		; go back to main loop - battery connected
 		; turn mute off (in case buzzer was muted)
@@ -398,7 +398,7 @@ chck_pcint:
 		; we also need to check voltage readings for voltage drop, if, for example, power will be disconnected while beep...
 		SKIP_IF_INPUT_ON	; macro for sbis or sbic command
 		rjmp PWM_loop_exit
-		sbic PORTB, V_Inp	; if pin is high, stay in this beep loop
+		sbic PINB, V_Inp	; if pin is high, stay in this beep loop
 		rjmp PWM_loop
 ; here we finish our handmade PWM routine for buzzer.
 PWM_loop_exit:
@@ -414,7 +414,10 @@ TIMER_ENABLE:
 		cbr tmp, (1 << PRTIM0) ; clear bit
 		out PRR, tmp
 		; configure timer 0 to work in CTC mode (4), no prescaler
-		ldi tmp, (1 << ICNC0) | (0 << ICES0) | (1 << WGM02) | (1 << CS00) ; also preconfigure ICP mode
+		;ldi tmp, (1 << OCIE0A) ; enable compare interrupt 
+		;out TIMSK0, tmp
+		
+		ldi tmp, (0 << ICNC0) | (0 << ICES0) | (1 << WGM02) | (1 << CS00) ; also preconfigure ICP mode
 		out TCCR0B, tmp
 		; reset timer
 		out TCNT0H, z0
