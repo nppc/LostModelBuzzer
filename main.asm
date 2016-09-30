@@ -418,11 +418,11 @@ chck_pcint:
 		rjmp PWM_loop
 ; here we finish our handmade PWM routine for buzzer.
 PWM_loop_exit:
+		rcall MAIN_CLOCK_250KHZ
 		; disable the timer
 		rcall TIMER_DISABLE
 ; ***** END OF MANUAL PWM ROUTINE ******
 PWM_exit:
-		rcall MAIN_CLOCK_250KHZ
 ret
 
 TIMER_ENABLE:
@@ -466,4 +466,3 @@ MAIN_CLOCK_250KHZ:
 		ldi tmp, (0 << CLKPS3) | (1 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 32 (250khz)
 		out  CLKPSR, tmp
 		ret
-		
