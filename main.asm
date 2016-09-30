@@ -1,4 +1,5 @@
 #define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
+;#define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
 
 /*
  * Author: nppc
@@ -60,6 +61,9 @@
 .def	W1_DATA_H	= r23	; H data register for data, received by 1Wire protocol
 .def	icp_d		= r24	; delay from ICP routine (len of the signal)
 .def	mute_buzz	= r25	; flag indicates that we need to mute buzzer (after reset manually pressed).
+#ifdef PROGRESSIVE_DELAY
+.def	beeps_cntr	= r30	; Used in PROGRESSIVE_DELAY mode to count beeps
+#endif
 .def	z0			= r31	; zero reg
 ; r30 has the flag (no sound)
 
@@ -135,7 +139,8 @@ L1_RST_WAIT:
 		; TODO 1wire protocol
 		; configure timer0 for capturing 1w data
 		; TCCR0A, TCCR0B and TCCR0C is already configured
-W1_L0:	rcall TIMER_ENABLE	; enable timer0 and reset timer counter
+W1_L0:	rcall MAIN_CLOCK_4MHZ	; for simplicity lets run this routines allways on 4mhz
+		rcall TIMER_ENABLE	; enable timer0 and reset timer counter
 		ldi tmp, (1 << TOIE0); enable Overflow interrupt 
 		out TIMSK0, tmp
 		ldi tmp, (1 <<ICF0); clear ICF flag
@@ -210,8 +215,6 @@ RESET:
 		; initialize variables
 		clr z0				; general 0 value register
 		ldi pwm_volume, DEFAULT_VOUME	; Volume of buzzer 1-20
-		;clr wdt_cntr
-		;clr	buz_on_cntr		; default is beep until PCINT interrupt
 		clr mute_buzz		; by default buzzer is ON
 		; default Buzzer frequency
 		ldi tmp, low(TMR_COMP_VAL)
@@ -279,6 +282,10 @@ GO_BEACON:      ; right after power loss we wait a minute, and then beep
 		ldi buz_on_cntr, 40 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP_ON
 
+		#ifdef PROGRESSIVE_DELAY
+		clr beeps_cntr		; prepare counter for beeps in PROGRESSIVE_DELAY mode
+		#endif
+
 		ldi tmp, 8 ; about 1 minute
 BEAC_WT1:	
 		push tmp
@@ -296,10 +303,33 @@ BEAC_L1:ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall GO_sleep ; stops here until wake-up event occurs
 		ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP
+#ifdef PROGRESSIVE_DELAY
+		inc beeps_cntr	; inclrement counter. It should not overflow, because we will have very long delays at the end
+		ldi tmp, 1			; 8sec x 1 pause
+		cp beeps_cntr, 37	; 5 minutes
+		brlo BEAC_GO
+		ldi tmp, 2			; 8 sec x 2 pause
+		cp beeps_cntr, 55	; 10 minutes
+		brlo BEAC_GO
+		ldi tmp, 3			; 8 sec x 3 pause
+		cp beeps_cntr, 65	; 15 minutes
+		brlo BEAC_GO
+		ldi tmp, 4			; 8 sec x 4 pause
+BEAC_GO:push tmp
+		rcall WDT_On_8s
+		rcall GO_sleep ; stops here until wake-up event occur
+		pop tmp
+		sbic PINB, V_Inp	; if pin is low, then power is connected, stay in Beacon mode
+		rjmp BEAC_EXIT		; Jump out, because power is connected
+		dec tmp
+		brne BEAC_GO		; loop for pause
+		; if counter 0 then just continue to exit...		
+#else
 		rcall WDT_On_8s
 		rcall GO_sleep ; stops here until wake-up event occur
 		sbis PINB, V_Inp	; if pin is low, then power is connected, stay in Beacon mode
 		rjmp BEAC_L1
+#endif
 		; go back to main loop - battery connected
 		; turn mute off (in case buzzer was muted)
 BEAC_EXIT:
@@ -313,9 +343,9 @@ BEAC_EXIT:
 WDT_On_250ms:
 		ldi tmp1, (0<<WDE) | (1<<WDIE) | (1<<WDIF) | (0 << WDP3) | (1 << WDP2) | (0 << WDP1) | (0 << WDP0) ; 0.25 sec, interrupt enable
 		rjmp WDT_On
-WDT_On_1s:
-		ldi tmp1, (0<<WDE) | (1<<WDIE) | (1<<WDIF) | (0 << WDP3) | (1 << WDP2) | (1 << WDP1) | (0 << WDP0) ; 1 sec, interrupt enable
-		rjmp WDT_On
+;WDT_On_4s:
+;		ldi tmp1, (0<<WDE) | (1<<WDIE) | (1<<WDIF) | (1 << WDP3) | (0 << WDP2) | (0 << WDP1) | (0 << WDP0) ; 4 sec, interrupt enable
+;		rjmp WDT_On
 WDT_On_8s:
 		ldi tmp1, (0<<WDE) | (1<<WDIE) | (1<<WDIF) | (1 << WDP3) | (0 << WDP2) | (0 << WDP1) | (1 << WDP0) ; 8 sec, interrupt enable
 WDT_On:	wdr					; reset the WDT
