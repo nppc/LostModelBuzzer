@@ -42,7 +42,7 @@
 
 .EQU	TMR_COMP_VAL 	= 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
 .EQU	PWM_FAST_DUTY	= 20		; Fast PWM (Volume) duty cycle len
-.EQU	DEFAULT_VOUME	= 19		; Buzzer volume (1-20)
+.EQU	DEFAULT_VOUME	= 20		; Buzzer volume (1-20)
 
 .undef XL
 .undef XH
@@ -306,33 +306,33 @@ BEAC_L1:ldi buz_on_cntr, 200 ; load 255 to the buzzer counter (about 84ms)
 #ifdef PROGRESSIVE_DELAY
 		inc beeps_cntr	; inclrement counter. It should not overflow, because we will have very long delays at the end
 		ldi tmp, 1			; 8sec x 1 pause
-		cp beeps_cntr, 37	; 5 minutes
+		cpi beeps_cntr, 37	; 5 minutes
 		brlo BEAC_GO
 		ldi tmp, 2			; 8 sec x 2 pause
-		cp beeps_cntr, 55	; 10 minutes
+		cpi beeps_cntr, 55	; 10 minutes
 		brlo BEAC_GO
 		ldi tmp, 3			; 8 sec x 3 pause
-		cp beeps_cntr, 65	; 15 minutes
+		cpi beeps_cntr, 65	; 15 minutes
 		brlo BEAC_GO
 		ldi tmp, 4			; 8 sec x 4 pause
 BEAC_GO:push tmp
 		rcall WDT_On_8s
 		rcall GO_sleep ; stops here until wake-up event occur
 		pop tmp
-		sbic PINB, V_Inp	; if pin is low, then power is connected, stay in Beacon mode
+		sbic PINB, V_Inp	; if pin is low, then power is not connected, stay in Beacon mode
 		rjmp BEAC_EXIT		; Jump out, because power is connected
 		dec tmp
 		brne BEAC_GO		; loop for pause
-		; if counter 0 then just continue to exit...		
+		; if counter 0 then just continue...		
 #else
 		rcall WDT_On_8s
 		rcall GO_sleep ; stops here until wake-up event occur
 		sbis PINB, V_Inp	; if pin is low, then power is connected, stay in Beacon mode
-		rjmp BEAC_L1
 #endif
+		rjmp BEAC_L1
+BEAC_EXIT:
 		; go back to main loop - battery connected
 		; turn mute off (in case buzzer was muted)
-BEAC_EXIT:
 		clr mute_buzz	; buzzer should not be muted after going back to normal mode
 		;sts RST_OPTION, z0
 		rjmp MAIN_loop 
@@ -383,7 +383,7 @@ WAIT100MS:  ; routine that creates delay 100ms at 250KHZ
 		ldi  tmp1, 119
 L1: 	dec  tmp1
 		brne L1
-		dec  tmp1
+		dec  tmp
 		brne L1
 		ret
 		
