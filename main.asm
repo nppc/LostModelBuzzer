@@ -40,7 +40,8 @@
 .EQU	V_Inp		= PB0	; Input for supply voltage sensing
 
 .EQU	TMR_COMP_VAL 	= 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
-
+.EQU	PWM_FAST_DUTY	= 20		; Fast PWM (Volume) duty cycle len
+.EQU	DEFAULT_VOUME	= 19		; Buzzer volume (1-20)
 
 .undef XL
 .undef XH
@@ -49,15 +50,17 @@
 .undef ZL
 .undef ZH
 ; r0-r15 is not available in this tiny mcu series.
-.def	tmp			= r16 	; general temp register
+.def	tmp		= r16 	; general temp register
 .def	tmp1		= r17 	; general temp register
 .def	buz_on_cntr	= r18	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
-.def	itmp_sreg	= r19	; storage for SREG in interrupts
-.def	W1_DATA_L	= r20	; L data register for data, received by 1Wire protocol
-.def	W1_DATA_H	= r21	; H data register for data, received by 1Wire protocol
-.def	icp_d		= r22	; delay from ICP routine (len of the signal)
-.def	mute_buzz	= r23	; flag indicates that we need to mute buzzer (after reset manually pressed).
-.def	z0			= r31	; zero reg
+.def	pwm_volume	= r19	; range: 1-20. Variable that sets the volume of buzzer (interval when BUZZ_Out in fast PWM is HIGH)
+.def	pwm_counter	= r20	; just a counter for fast PWM duty cycle
+.def	itmp_sreg	= r21	; storage for SREG in interrupts
+.def	W1_DATA_L	= r22	; L data register for data, received by 1Wire protocol
+.def	W1_DATA_H	= r23	; H data register for data, received by 1Wire protocol
+.def	icp_d		= r24	; delay from ICP routine (len of the signal)
+.def	mute_buzz	= r25	; flag indicates that we need to mute buzzer (after reset manually pressed).
+.def	z0		= r31	; zero reg
 ; r30 has the flag (no sound)
 
 .DSEG
@@ -211,6 +214,7 @@ RESET:
 
 		; initialize variables
 		clr z0				; general 0 value register
+		ldi pwm_volume, DEFAULT_VOUME	; Volume of buzzer 1-20
 		;clr wdt_cntr
 		;clr	buz_on_cntr		; default is beep until PCINT interrupt
 		clr mute_buzz		; by default buzzer is ON
@@ -378,8 +382,18 @@ BEEP_ON:; call from here if we want to skip beep mute check...
 PWM_loop:
 		; PWM the buzzer at 50% duty cycle
 		sbi PORTB, BUZZ_Out 			;turn buzzer ON
-PWM_L1:	brts PWM_low					;Jump out if T flag is set (Compare Match)
-		rjmp PWM_L1
+		mov pwm_counter, pwm_volume		;Initialize counter
+PWM_F1:	brts PWM_low					;Jump out if T flag is set (Compare Match)
+		dec pwm_counter					;count value for pin ON for Buzzer volume regulation
+		brne PWM_F1
+		ldi pwm_counter, PWM_FAST_DUTY	;initialize couner for remaining cycle
+ 		sub pwm_counter, pwm_volume		;adjust counter to correct value
+		breq PWM_loop					;if volume at max (pwm_dutyfst=pwm_volume) then do not turn buzzer pin low.
+		cbi PORTB, BUZZ_Out 			;turn buzzer OFF
+PWM_F2:	brts PWM_low					; Jump out if T flag is set (Compare Match)
+		dec pwm_counter					;count value for pin OFF for Buzzer volume regulation
+		brne PWM_F2
+		rjmp PWM_loop					;loop untill exit by Timer Compare match (T flag)
 PWM_low:; now second part of 3khz duty cycle
 		cbi PORTB, BUZZ_Out	; PWM in low state
 		clt		; reset timer capture match flag
