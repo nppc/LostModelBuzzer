@@ -50,7 +50,7 @@
 .undef ZL
 .undef ZH
 ; r0-r15 is not available in this tiny mcu series.
-.def	tmp		= r16 	; general temp register
+.def	tmp			= r16 	; general temp register
 .def	tmp1		= r17 	; general temp register
 .def	buz_on_cntr	= r18	; 0 - buzzer is beeps until pinchange interrupt occurs. 255 - 84ms beep
 .def	pwm_volume	= r19	; range: 1-20. Variable that sets the volume of buzzer (interval when BUZZ_Out in fast PWM is HIGH)
@@ -60,7 +60,7 @@
 .def	W1_DATA_H	= r23	; H data register for data, received by 1Wire protocol
 .def	icp_d		= r24	; delay from ICP routine (len of the signal)
 .def	mute_buzz	= r25	; flag indicates that we need to mute buzzer (after reset manually pressed).
-.def	z0		= r31	; zero reg
+.def	z0			= r31	; zero reg
 ; r30 has the flag (no sound)
 
 .DSEG
@@ -92,7 +92,7 @@ RST_PRESSED: ; we come here when reset button is pressed
 		; Currently I think about this options:
 		; 1. disable buzzer. After battery is disconnected, if user press reset, then it disables beakon functionality until batery is connected back.
 		; 2. configure LostModelBuzzer. with some 1wire simple protocol change parameters. (Actually just test them, then reflash, because of no EEPROM for config).
-		;    configurable: Buzzer freq, delay for start beakon after power loss, loudness of the buzzer (fixed or adjustad by voltage).
+		;    configurable: Buzzer freq.
 		rcall WAIT100MS
 		; if we are not powered from battery, do only buzzer mute 
 		sbis PINB, V_Inp	; if pin is low, then only buzzer mute can be enabled
@@ -116,10 +116,10 @@ L1_BUZ_RST:
 		dec tmp
 		brne L1_BUZ_RST
 		;wait 2 seconds more...
-		ldi tmp, 40
+		ldi tmp, 20
 L1_RST_WAIT:
 		push tmp
-		rcall WAIT50MS
+		rcall WAIT100MS
 		pop tmp
 		dec tmp
 		brne L1_RST_WAIT
@@ -200,18 +200,13 @@ RESET:
 		; determine why we are here (by power-on or by reset pin goes to low)
 		in tmp1, RSTFLR	; tmp1 should not be changed til sbrc tmp1, EXTRF
 		
-		; 4Mhz (Leave 8 mhz osc with prescaler 2)
-		; Write signature for change enable of protected I/O register
-		ldi tmp, 0xD8
-		out CCP, tmp
-		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 2 (4mhz)
-		out  CLKPSR, tmp
-
 		ldi tmp, high (RAMEND) ; Main program start
 		out SPH,tmp ; Set Stack Pointer
 		ldi tmp, low (RAMEND) ; to top of RAM
 		out SPL,tmp
-
+		
+		rcall MAIN_CLOCK_250KHZ	; set main clock to 250KHZ...
+		
 		; initialize variables
 		clr z0				; general 0 value register
 		ldi pwm_volume, DEFAULT_VOUME	; Volume of buzzer 1-20
@@ -283,10 +278,9 @@ MAIN_loop:
 GO_BEACON:      ; right after power loss we wait a minute, and then beep
 		ldi buz_on_cntr, 40 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP_ON
-		
+
 		ldi tmp, 8 ; about 1 minute
 BEAC_WT1:	
-		; TODO-TEST exit here if battery connected back...
 		push tmp
 		rcall WDT_On_8s
 		rcall GO_sleep
@@ -344,17 +338,24 @@ GO_sleep:
 		; stops here until wake-up event occurs
 		ret
 
-WAIT100MS:  ; routine that creates delay 100ms at 4mhz
-		rcall WAIT50MS
-WAIT50MS:	; routine that creates delay 50ms at 4mhz
-		ldi  tmp, 255
-		ldi  tmp1, 139
-WT50_1: dec  tmp1
-		brne WT50_1
-		dec  tmp
-		brne WT50_1
+;WAIT100MS:  ; routine that creates delay 100ms at 4mhz
+;		rcall WAIT50MS
+;WAIT50MS:	; routine that creates delay 50ms at 4mhz
+;		ldi  tmp, 255
+;		ldi  tmp1, 139
+;WT50_1: dec  tmp1
+;		brne WT50_1
+;		dec  tmp
+;		brne WT50_1
+;		ret
+WAIT100MS:  ; routine that creates delay 100ms at 250KHZ
+		ldi  tmp, 33
+		ldi  tmp1, 119
+L1: 	dec  tmp1
+		brne L1
+		dec  tmp1
+		brne L1
 		ret
-
 		
 ; Beep the buzzer.
 ;variable buz_on_cntr determines, will routine beep until PCINT cbange interrupt (0 value), or short beep - max 84ms (255 value)
@@ -363,6 +364,7 @@ BEEP:
 		brne PWM_exit		; no sound if flag mute_buzz is set
 		; set volume
 BEEP_ON:; call from here if we want to skip beep mute check... 
+		rcall MAIN_CLOCK_4MHZ
 		; enable timer0
 		rcall TIMER_ENABLE	; reset timer counter
 		ldi tmp, (1 << OCIE0A) ; enable compare interrupt 
@@ -420,6 +422,7 @@ PWM_loop_exit:
 		rcall TIMER_DISABLE
 ; ***** END OF MANUAL PWM ROUTINE ******
 PWM_exit:
+		rcall MAIN_CLOCK_250KHZ
 ret
 
 TIMER_ENABLE:
@@ -444,5 +447,23 @@ TIMER_DISABLE:
 		in tmp, PRR
 		sbr tmp, (1 << PRTIM0) ; set bit
 		out PRR, tmp
+		ret
+
+MAIN_CLOCK_4MHZ:
+		; 4Mhz (Leave 8 mhz osc with prescaler 2)
+		; Write signature for change enable of protected I/O register
+		ldi tmp, 0xD8
+		out CCP, tmp
+		ldi tmp, (0 << CLKPS3) | (0 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 2 (4mhz)
+		out  CLKPSR, tmp
+		ret
+
+MAIN_CLOCK_250KHZ:
+		; 250khz (Leave 8 mhz osc with prescaler 32)
+		; Write signature for change enable of protected I/O register
+		ldi tmp, 0xD8
+		out CCP, tmp
+		ldi tmp, (0 << CLKPS3) | (1 << CLKPS2) | (0 << CLKPS1) | (1 << CLKPS0) ;  prescaler is 32 (250khz)
+		out  CLKPSR, tmp
 		ret
 		
