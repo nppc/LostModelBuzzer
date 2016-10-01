@@ -1,5 +1,5 @@
 #define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
-;#define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
+#define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
 
 /*
  * Author: nppc
@@ -40,7 +40,7 @@
 .EQU	BUZZ_Inp	= PB1	; BUZZER Input from FC 
 .EQU	V_Inp		= PB0	; Input for supply voltage sensing
 
-.EQU	TMR_COMP_VAL 	= 645 - 30	; about 3.1 khz (50% duty cycle) at 4mhz clock source
+.EQU	TMR_COMP_VAL 	= 595	; about 3.1 khz (50% duty cycle) at 4mhz clock source
 .EQU	PWM_FAST_DUTY	= 20		; Fast PWM (Volume) duty cycle len
 .EQU	DEFAULT_VOUME	= 20		; Buzzer volume (1-20)
 
@@ -141,6 +141,8 @@ L1_RST_WAIT:
 		; TCCR0A, TCCR0B and TCCR0C is already configured
 W1_L0:	rcall MAIN_CLOCK_4MHZ	; for simplicity lets run this routines allways on 4mhz
 		rcall TIMER_ENABLE	; enable timer0 and reset timer counter
+		ldi tmp, (1 << ICNC0) | (0 << ICES0) | (0 << WGM02) | (1 << CS00) ; configure ICP mode
+		out TCCR0B, tmp
 		ldi tmp, (1 << TOIE0); enable Overflow interrupt 
 		out TIMSK0, tmp
 		ldi tmp, (1 <<ICF0); clear ICF flag
@@ -154,10 +156,23 @@ W1_L1:	; Oveflow will be indicated by T flag is set
 		clr W1_DATA_H	; prepare register for receiving 16 bit of data
 		ldi tmp1, 16	; counter for receiving bits
 		; now wait for the first ICP, it will be the beginning of the first bit.		
+
+		;ldi buz_on_cntr, 30 ; debug beep
+		;rcall BEEP_ON		; ignore mute flag
+		;rjmp W1_L0
+
 W1_L2:	brts W1_L0		; start over, desync or no data came
 		in tmp, TIFR0
 		sbrs tmp, ICF0
 		rjmp W1_L2		; loop
+		out TCNT0H, z0	; clear counter
+		out TCNT0L, z0
+		ldi tmp, (1 <<ICF0)	; clear ICF flag
+		out TIFR0, tmp		; clear ICF flag
+W1_L3:	brts W1_L0		; Now wait for end bit strobe
+		in tmp, TIFR0
+		sbrs tmp, ICF0
+		rjmp W1_L3		; loop
 		; read ICP register
 		in icp_d, ICR0L
 		in icp_d, ICR0H	; we are interested in High byte only
@@ -181,10 +196,10 @@ W1_L2:	brts W1_L0		; start over, desync or no data came
 		sec				; set C flag
 		rjmp W1_CONT
 W1_LOW:	clc				; clear C flag
-W1_CONT:rol W1_DATA_L	; shift left one bit with C
-		rol W1_DATA_H	; shift left one bit with C
+W1_CONT:ror W1_DATA_H	; shift right one bit with C
+		ror W1_DATA_L	; shift right one bit with C
 		dec tmp1		; go tro next bit
-		brne W1_L2		; loop until all data received
+		brne W1_L3		; loop until all data received
 		; all data received
 		; it is frequency value
 		; adjust frequency variable
@@ -258,6 +273,8 @@ RESET:
 		sbrc tmp1, EXTRF ; skip next command if reset occurs not by external reset
 		rjmp RST_PRESSED
 
+		; TEST ***************************
+		;rjmp W1_L0
 PRG_CONT:
 		
 ;******* MAIN LOOP *******	
@@ -461,9 +478,6 @@ TIMER_ENABLE:
 		cbr tmp, (1 << PRTIM0) ; clear bit
 		out PRR, tmp
 		; configure timer 0 to work in CTC mode (4), no prescaler
-		;ldi tmp, (1 << OCIE0A) ; enable compare interrupt 
-		;out TIMSK0, tmp
-		
 		ldi tmp, (0 << ICNC0) | (0 << ICES0) | (1 << WGM02) | (1 << CS00) ; also preconfigure ICP mode
 		out TCCR0B, tmp
 		; reset timer
