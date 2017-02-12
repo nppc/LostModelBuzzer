@@ -1,6 +1,7 @@
-#define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
+//#define INVERTED_INPUT	; for FCs like CC3D when buzzer controlled by inverted signal (LOW means active)
 #define PROGRESSIVE_DELAY	; Enables longer delay with time (Delay: 8 sec, after 5min - 16 sec, after 10 min - 24 sec, after 15 min - 32 sec)
-
+//#define FREQ_GEN	; procedure to beep on different freq via 1 wire uart protocol 
+//#define DEBUG ; skip one minute delay after power loss
 /*
  * Author: nppc
  * Hardware design: nppc
@@ -40,7 +41,9 @@
 .EQU	BUZZ_Inp	= PB1	; BUZZER Input from FC 
 .EQU	V_Inp		= PB0	; Input for supply voltage sensing
 
-.EQU	TMR_COMP_VAL 	= 595	; about 3.1 khz (50% duty cycle) at 4mhz clock source
+; 595 - 3.1khz
+
+.EQU	TMR_COMP_VAL 	= 870	; about 3.1 khz (50% duty cycle) at 4mhz clock source
 .EQU	PWM_FAST_DUTY	= 20		; Fast PWM (Volume) duty cycle len
 .EQU	DEFAULT_VOUME	= 20		; Buzzer volume (1-20)
 
@@ -107,7 +110,7 @@ RST_PRESSED: ; we come here when reset button is pressed
 		; loop if pressed too much times
 		cpi tmp, 3			; 3 is non existing mode
 		brne SKP_OPT_LOOP
-		ldi tmp, 1			; gp back to option 1
+		ldi tmp, 1			; go back to option 1
 SKP_OPT_LOOP:
 		sts RST_OPTION, tmp
 		; beep n times according to RST_OPTION
@@ -139,6 +142,7 @@ L1_RST_WAIT:
 		; TODO 1wire protocol
 		; configure timer0 for capturing 1w data
 		; TCCR0A, TCCR0B and TCCR0C is already configured
+#ifdef FREQ_GEN
 W1_L0:	rcall MAIN_CLOCK_4MHZ	; for simplicity lets run this routines allways on 4mhz
 		rcall TIMER_ENABLE	; enable timer0 and reset timer counter
 		ldi tmp, (1 << ICNC0) | (0 << ICES0) | (0 << WGM02) | (1 << CS00) ; configure ICP mode
@@ -210,6 +214,7 @@ W1_CONT:ror W1_DATA_H	; shift right one bit with C
 		ldi buz_on_cntr, 255 ; load 255 to the buzzer counter (about 84ms)
 		rcall BEEP_ON	; skip mute check
 		rjmp W1_L0		; back to listen for 1Wire protocol
+#endif
 RST_BUZZ_OFF:
 		ldi mute_buzz, 1
 		rjmp PRG_CONT	; back to main program
@@ -304,6 +309,9 @@ GO_BEACON:      ; right after power loss we wait a minute, and then beep
 		#endif
 
 		ldi tmp, 8 ; about 1 minute
+#ifdef DEBUG
+		ldi tmp, 1 
+#endif
 BEAC_WT1:	
 		push tmp
 		rcall WDT_On_8s
